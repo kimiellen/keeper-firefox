@@ -1,0 +1,389 @@
+/**
+ * Keeper API Client
+ *
+ * 完整的 REST API 客户端，支持认证、书签、标签、关联、统计等功能
+ */
+
+import type {
+  ApiError,
+  InitializeRequest,
+  InitializeResponse,
+  UnlockRequest,
+  UnlockResponse,
+  AuthStatus,
+  Bookmark,
+  BookmarkCreate,
+  BookmarkUpdate,
+  BookmarkPatch,
+  BookmarkListParams,
+  BookmarkListResponse,
+  BookmarkUseRequest,
+  BookmarkUseResponse,
+  Tag,
+  TagCreate,
+  TagUpdate,
+  TagListParams,
+  TagListResponse,
+  Relation,
+  RelationCreate,
+  RelationUpdate,
+  RelationListResponse,
+  StatsResponse,
+  ExportResponse,
+  ImportResponse,
+  HealthResponse,
+  KdfParams,
+} from './types';
+
+const DEFAULT_BASE_URL = 'https://127.0.0.1:8443/api';
+const DEFAULT_TIMEOUT = 30000;
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000;
+
+/**
+ * API 错误类
+ */
+export class KeeperApiError extends Error {
+  constructor(
+    message: string,
+    public readonly type: string,
+    public readonly status: number,
+    public readonly detail: string,
+    public readonly errors?: { field: string; message: string; code: string }[]
+  ) {
+    super(message);
+    this.name = 'KeeperApiError';
+  }
+
+  static fromResponse(error: ApiError): KeeperApiError {
+    return new KeeperApiError(
+      error.detail,
+      error.type,
+      error.status,
+      error.detail,
+      error.errors
+    );
+  }
+
+  static isAuthError(error: unknown): boolean {
+    return error instanceof KeeperApiError && (error.status === 401 || error.status === 403);
+  }
+
+  static isNotFoundError(error: unknown): boolean {
+    return error instanceof KeeperApiError && error.status === 404;
+  }
+
+  static isValidationError(error: unknown): boolean {
+    return error instanceof KeeperApiError && error.status === 422;
+  }
+}
+
+/**
+ * API 客户端选项
+ */
+export interface KeeperClientOptions {
+  baseUrl?: string;
+  timeout?: number;
+  retries?: number;
+  retryDelay?: number;
+  onUnauthorized?: () => void;
+}
+
+/**
+ * Keeper API 客户端
+ */
+export class KeeperClient {
+  private baseUrl: string;
+  private timeout: number;
+  private retries: number;
+  private retryDelay: number;
+  private onUnauthorized?: () => void;
+
+  constructor(options: KeeperClientOptions = {}) {
+    this.baseUrl = options.baseUrl || DEFAULT_BASE_URL;
+    this.timeout = options.timeout || DEFAULT_TIMEOUT;
+    this.retries = options.retries || MAX_RETRIES;
+    this.retryDelay = options.retryDelay || RETRY_DELAY;
+    this.onUnauthorized = options.onUnauthorized;
+  }
+
+  /**
+   * 发送 API 请求
+   */
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    params?: Record<string, string | number | boolean | undefined>
+  ): Promise<T> {
+    // 构建 URL
+    let url = `${this.baseUrl}${path}`;
+    if (params) {
+      const searchParams = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined) {
+          searchParams.append(key, String(value));
+        }
+      }
+      const queryString = searchParams.toString();
+      if (queryString) {
+        url += `?${queryString}`;
+      }
+    }
+
+    // 构建请求选项
+    const options: RequestInit = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      credentials: 'include', // 发送 Cookie
+    };
+
+    if (body) {
+      options.body = JSON.stringify(body);
+    }
+
+    // 发送请求（带重试）
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= this.retries; attempt++) {
+      try {
+        const response = await this.fetchWithTimeout(url, options);
+
+        // 处理 401 未授权
+        if (response.status === 401 && this.onUnauthorized) {
+          this.onUnauthorized();
+        }
+
+        // 204 No Content
+        if (response.status === 204) {
+          return undefined as T;
+        }
+
+        // 检查响应状态
+        if (!response.ok) {
+          const error: ApiError = await response.json().catch(() => ({
+            type: 'https://keeper.local/errors/unknown',
+            title: 'Unknown Error',
+            status: response.status,
+            detail: response.statusText,
+          }));
+          throw KeeperApiError.fromResponse(error);
+        }
+
+        // 解析 JSON 响应
+        return response.json() as Promise<T>;
+      } catch (error) {
+        // 如果是可重试的错误且还有重试次数
+        if (attempt < this.retries && this.isRetryableError(error)) {
+          lastError = error as Error;
+          await this.delay(this.retryDelay * (attempt + 1));
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * 带超时的 fetch
+   */
+  private fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new Error(`Request timeout after ${this.timeout}ms`));
+      }, this.timeout);
+
+      fetch(url, options)
+        .then((response) => {
+          clearTimeout(timeoutId);
+          resolve(response);
+        })
+        .catch((error) => {
+          clearTimeout(timeoutId);
+          reject(error);
+        });
+    });
+  }
+
+  /**
+   * 判断错误是否可重试
+   */
+  private isRetryableError(error: unknown): boolean {
+    if (error instanceof KeeperApiError) {
+      // 网络错误、5xx 错误可重试
+      return error.status >= 500 || error.type.includes('network');
+    }
+    if (error instanceof TypeError) {
+      // 网络错误（DNS 解析失败、连接失败等）
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 延迟
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // ============ 健康检查 ============
+
+  /** 健康检查（开发环境） */
+  async health(): Promise<HealthResponse> {
+    return this.request<HealthResponse>('GET', '/health');
+  }
+
+  // ============ 认证 ============
+
+  /** 初始化（首次使用） */
+  async initialize(data: InitializeRequest): Promise<InitializeResponse> {
+    return this.request<InitializeResponse>('POST', '/auth/initialize', data);
+  }
+
+  /** 解锁（登录） */
+  async unlock(data: UnlockRequest): Promise<UnlockResponse> {
+    return this.request<UnlockResponse>('POST', '/auth/unlock', data);
+  }
+
+  /** 锁定（登出） */
+  async lock(): Promise<void> {
+    return this.request<void>('POST', '/auth/lock');
+  }
+
+  /** 检查会话状态 */
+  async getStatus(): Promise<AuthStatus> {
+    return this.request<AuthStatus>('GET', '/auth/status');
+  }
+
+  // ============ 书签 ============
+
+  /** 获取书签列表 */
+  async getBookmarks(params?: BookmarkListParams): Promise<BookmarkListResponse> {
+    return this.request<BookmarkListResponse>('GET', '/bookmarks', undefined, params);
+  }
+
+  /** 获取单个书签 */
+  async getBookmark(id: string): Promise<Bookmark> {
+    return this.request<Bookmark>('GET', `/bookmarks/${id}`);
+  }
+
+  /** 创建书签 */
+  async createBookmark(data: BookmarkCreate): Promise<Bookmark> {
+    return this.request<Bookmark>('POST', '/bookmarks', data);
+  }
+
+  /** 完整更新书签（PUT） */
+  async updateBookmark(id: string, data: BookmarkUpdate): Promise<Bookmark> {
+    return this.request<Bookmark>('PUT', `/bookmarks/${id}`, data);
+  }
+
+  /** 部分更新书签（PATCH） */
+  async patchBookmark(id: string, data: BookmarkPatch): Promise<Bookmark> {
+    return this.request<Bookmark>('PATCH', `/bookmarks/${id}`, data);
+  }
+
+  /** 删除书签 */
+  async deleteBookmark(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/bookmarks/${id}`);
+  }
+
+  /** 更新最后使用时间 */
+  async useBookmark(id: string, data: BookmarkUseRequest): Promise<BookmarkUseResponse> {
+    return this.request<BookmarkUseResponse>('POST', `/bookmarks/${id}/use`, data);
+  }
+
+  // ============ 标签 ============
+
+  /** 获取标签列表 */
+  async getTags(params?: TagListParams): Promise<TagListResponse> {
+    return this.request<TagListResponse>('GET', '/tags', undefined, params);
+  }
+
+  /** 获取单个标签 */
+  async getTag(id: number): Promise<Tag> {
+    return this.request<Tag>('GET', `/tags/${id}`);
+  }
+
+  /** 创建标签 */
+  async createTag(data: TagCreate): Promise<Tag> {
+    return this.request<Tag>('POST', '/tags', data);
+  }
+
+  /** 更新标签 */
+  async updateTag(id: number, data: TagUpdate): Promise<Tag> {
+    return this.request<Tag>('PUT', `/tags/${id}`, data);
+  }
+
+  /** 删除标签 */
+  async deleteTag(id: number, cascade: boolean = false): Promise<void> {
+    return this.request<void>('DELETE', `/tags/${id}`, undefined, { cascade });
+  }
+
+  // ============ 关联 ============
+
+  /** 获取关联列表 */
+  async getRelations(): Promise<RelationListResponse> {
+    return this.request<RelationListResponse>('GET', '/relations');
+  }
+
+  /** 获取单个关联 */
+  async getRelation(id: number): Promise<Relation> {
+    return this.request<Relation>('GET', `/relations/${id}`);
+  }
+
+  /** 创建关联 */
+  async createRelation(data: RelationCreate): Promise<Relation> {
+    return this.request<Relation>('POST', '/relations', data);
+  }
+
+  /** 更新关联 */
+  async updateRelation(id: number, data: RelationUpdate): Promise<Relation> {
+    return this.request<Relation>('PUT', `/relations/${id}`, data);
+  }
+
+  /** 删除关联 */
+  async deleteRelation(id: number, cascade: boolean = false): Promise<void> {
+    return this.request<void>('DELETE', `/relations/${id}`, undefined, { cascade });
+  }
+
+  // ============ 统计 ============
+
+  /** 获取概览统计 */
+  async getStats(): Promise<StatsResponse> {
+    return this.request<StatsResponse>('GET', '/stats');
+  }
+
+  // ============ 导入导出 ============
+
+  /** 导出数据 */
+  async exportData(format: 'json' | 'csv' = 'json'): Promise<ExportResponse | string> {
+    return this.request<ExportResponse | string>('GET', '/export', undefined, { format });
+  }
+
+  /** 导入数据 */
+  async importData(file: File, merge: boolean = false): Promise<ImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch(`${this.baseUrl}/import?merge=${merge}`, {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+    });
+
+    if (!response.ok) {
+      const error: ApiError = await response.json();
+      throw KeeperApiError.fromResponse(error);
+    }
+
+    return response.json();
+  }
+}
+
+// 导出默认客户端实例
+export const keeperClient = new KeeperClient();

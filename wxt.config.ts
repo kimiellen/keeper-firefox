@@ -1,8 +1,10 @@
 import { defineConfig } from 'wxt';
-import vue from '@wxt-dev/module-vue';
+import vue from '@vitejs/plugin-vue';
 
 export default defineConfig({
-  modules: [vue],
+  vite: () => ({
+    plugins: [vue()],
+  }),
   manifest: {
     name: 'Keeper',
     version: '1.0.0',
@@ -16,8 +18,20 @@ export default defineConfig({
     permissions: [
       'storage',
       'activeTab',
-      'scripting'
-    ]
+      'scripting',
+      'contextMenus',
+      'tabs',
+      '<all_urls>'
+    ],
+    sidebar_action: {
+      default_title: 'Keeper',
+      default_panel: 'sidepanel.html',
+      default_icon: {
+        '16': '/icons/16.png',
+        '32': '/icons/32.png',
+        '48': '/icons/48.png'
+      }
+    }
   },
   browser: 'firefox'
 });

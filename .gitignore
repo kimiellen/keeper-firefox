@@ -1,7 +1,10 @@
 node_modules/
 dist/
 dist_firefox/
+.output/
+.wxt/
 *.log
 .env
 .env.local
 .DS_Store
+test-crypto.html

@@ -15,6 +15,14 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.vue"],
-  "exclude": ["node_modules", "dist", "dist_firefox"]
+  "include": [
+    "entrypoints/**/*.ts",
+    "entrypoints/**/*.vue",
+    "api/**/*.ts",
+    "stores/**/*.ts",
+    "utils/**/*.ts",
+    "env.d.ts",
+    ".wxt/wxt.d.ts"
+  ],
+  "exclude": ["node_modules", "dist", "dist_firefox", ".output"]
 }
