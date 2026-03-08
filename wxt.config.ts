@@ -21,6 +21,8 @@ export default defineConfig({
       'scripting',
       'contextMenus',
       'tabs',
+      'webRequest',
+      'webRequestBlocking',
       '<all_urls>'
     ],
     sidebar_action: {
