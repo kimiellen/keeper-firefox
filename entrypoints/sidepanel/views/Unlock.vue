@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from 'vue';
 import { useAuthStore } from '../../../stores/auth';
+import { useDatabaseStore } from '../../../stores/database';
+import { KeyManager } from '../../../utils/crypto';
+import { Check, Folder, Plus } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 
 const emit = defineEmits<{
@@ -8,14 +11,30 @@ const emit = defineEmits<{
 }>();
 
 const authStore = useAuthStore();
+const databaseStore = useDatabaseStore();
 const password = ref('');
 const isLoading = ref(false);
 const error = ref('');
 const activeTab = ref<string>('password');
 const passwordInput = ref<InstanceType<typeof import('element-plus')['ElInput']> | null>(null);
 
+
+const isSelectorOpen = ref(false);
+const showOpenDbInput = ref(false);
+const showCreateDbInput = ref(false);
+const dbPathInput = ref('');
+const showCreateDialog = ref(false);
+const createForm = ref({
+  email: '',
+  password: '',
+  confirmPassword: ''
+});
+const isCreating = ref(false);
+const createError = ref('');
+
 // 加载保存的 tab 状态
-onMounted(() => {
+onMounted(async () => {
+  await databaseStore.fetchList();
   const savedTab = localStorage.getItem('unlockTab');
   if (savedTab === 'password' || savedTab === 'fingerprint') {
     activeTab.value = savedTab;
@@ -48,7 +67,8 @@ async function handleUnlock() {
   error.value = '';
 
   try {
-    const success = await authStore.unlock(password.value);
+    await authStore.unlock(password.value);
+    const success = !authStore.locked;
     if (success) {
       emit('unlocked');
     } else {
@@ -58,6 +78,123 @@ async function handleUnlock() {
     error.value = '解锁失败';
   } finally {
     isLoading.value = false;
+  }
+}
+
+
+// 数据库选择器方法
+function toggleSelector() {
+  isSelectorOpen.value = !isSelectorOpen.value;
+  if (!isSelectorOpen.value) {
+    showOpenDbInput.value = false;
+    showCreateDbInput.value = false;
+    dbPathInput.value = '';
+  }
+}
+
+async function selectDatabase(path: string) {
+  if (path === databaseStore.currentPath) {
+    isSelectorOpen.value = false;
+    return;
+  }
+  
+  const success = await databaseStore.openDatabase(path);
+  if (success) {
+    authStore.reset();
+    isSelectorOpen.value = false;
+    ElMessage.success('数据库已切换');
+  } else {
+    ElMessage.error(databaseStore.error || '切换失败');
+  }
+}
+
+function handleOpenDbClick() {
+  showOpenDbInput.value = true;
+  showCreateDbInput.value = false;
+  dbPathInput.value = '';
+}
+
+async function submitOpenDb() {
+  if (!dbPathInput.value) return;
+  const success = await databaseStore.openDatabase(dbPathInput.value);
+  if (success) {
+    authStore.reset();
+    isSelectorOpen.value = false;
+    showOpenDbInput.value = false;
+    ElMessage.success('数据库已打开');
+  } else {
+    ElMessage.error(databaseStore.error || '打开失败');
+  }
+}
+
+function handleCreateDbClick() {
+  showCreateDbInput.value = true;
+  showOpenDbInput.value = false;
+  dbPathInput.value = '';
+}
+
+function submitCreateDb() {
+  if (!dbPathInput.value) return;
+  showCreateDialog.value = true;
+}
+
+function cancelCreate() {
+  showCreateDialog.value = false;
+  createForm.value = { email: '', password: '', confirmPassword: '' };
+  createError.value = '';
+}
+
+async function doCreateDatabase() {
+  if (!createForm.value.email) {
+    createError.value = '请输入邮箱';
+    return;
+  }
+  if (!createForm.value.password) {
+    createError.value = '请输入密码';
+    return;
+  }
+  if (createForm.value.password !== createForm.value.confirmPassword) {
+    createError.value = '两次输入的密码不一致';
+    return;
+  }
+
+  isCreating.value = true;
+  createError.value = '';
+
+  try {
+    const email = createForm.value.email;
+    const password = createForm.value.password;
+    const path = dbPathInput.value;
+
+    const { encryptedUserKey, kdfParams } = await KeyManager.createEncryptedUserKey(password, email);
+    
+    const success = await databaseStore.createDatabase(
+      path,
+      email,
+      password,
+      encryptedUserKey,
+      {
+        algorithm: kdfParams.algorithm,
+        memory: kdfParams.memory,
+        iterations: kdfParams.iterations,
+        parallelism: kdfParams.parallelism,
+        salt: kdfParams.salt
+      }
+    );
+
+    if (success) {
+      authStore.reset();
+      cancelCreate();
+      isSelectorOpen.value = false;
+      showCreateDbInput.value = false;
+      ElMessage.success('数据库已创建并打开');
+    } else {
+      createError.value = databaseStore.error || '创建失败';
+    }
+  } catch (e: any) {
+    createError.value = e.message || '创建失败';
+  } finally {
+    isCreating.value = false;
   }
 }
 
@@ -130,6 +267,121 @@ function handleFingerprint() {
         </div>
       </el-tab-pane>
     </el-tabs>
+
+    <!-- 数据库选择器 -->
+    <div class="db-selector-container">
+      <div class="db-selector-trigger" @click="toggleSelector">
+        <span class="db-name">{{ databaseStore.currentName }}</span>
+        <svg class="dropdown-icon" :class="{ 'is-open': isSelectorOpen }" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </div>
+
+      <div v-show="isSelectorOpen" class="db-dropdown">
+        <!-- 历史列表 -->
+        <div class="db-list">
+          <div 
+            v-for="db in databaseStore.databases" 
+            :key="db.path"
+            class="db-item"
+            :class="{ active: db.path === databaseStore.currentPath }"
+            @click="selectDatabase(db.path)"
+          >
+            <el-icon v-if="db.path === databaseStore.currentPath" class="check-icon"><Check /></el-icon>
+            <span v-else class="check-placeholder"></span>
+            <span class="db-filename" :title="db.path">{{ db.name }}</span>
+          </div>
+        </div>
+
+        <div class="dropdown-divider"></div>
+
+        <!-- 打开现有 -->
+        <div v-if="!showOpenDbInput" class="db-action-item" @click="handleOpenDbClick">
+          <el-icon><Folder /></el-icon>
+          <span>选择数据库...</span>
+        </div>
+        <div v-else class="db-action-input">
+          <el-input 
+            v-model="dbPathInput" 
+            placeholder="输入数据库文件路径" 
+            size="small"
+            @keyup.enter="submitOpenDb"
+            autofocus
+          >
+            <template #append>
+              <el-button @click="submitOpenDb">打开</el-button>
+            </template>
+          </el-input>
+        </div>
+
+        <div class="dropdown-divider"></div>
+
+        <!-- 新建数据库 -->
+        <div v-if="!showCreateDbInput" class="db-action-item" @click="handleCreateDbClick">
+          <el-icon><Plus /></el-icon>
+          <span>新建数据库...</span>
+        </div>
+        <div v-else class="db-action-input">
+          <el-input 
+            v-model="dbPathInput" 
+            placeholder="输入新数据库文件路径" 
+            size="small"
+            @keyup.enter="submitCreateDb"
+            autofocus
+          >
+            <template #append>
+              <el-button @click="submitCreateDb">新建</el-button>
+            </template>
+          </el-input>
+        </div>
+      </div>
+    </div>
+
+    <!-- 创建数据库对话框 -->
+    <el-dialog
+      v-model="showCreateDialog"
+      title="设置主密码"
+      width="90%"
+      class="create-db-dialog"
+      :show-close="false"
+      align-center
+    >
+      <div class="create-form">
+        <el-input
+          v-model="createForm.email"
+          placeholder="邮箱账号"
+          size="large"
+          type="email"
+        />
+        <el-input
+          v-model="createForm.password"
+          placeholder="主密码"
+          size="large"
+          type="password"
+          show-password
+        />
+        <el-input
+          v-model="createForm.confirmPassword"
+          placeholder="确认主密码"
+          size="large"
+          type="password"
+          show-password
+          @keyup.enter="doCreateDatabase"
+        />
+        <div v-if="createError" class="error-message dialog-error">
+          {{ createError }}
+        </div>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="cancelCreate" :disabled="isCreating">取消</el-button>
+          <el-button type="primary" @click="doCreateDatabase" :loading="isCreating">
+            创建
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -238,4 +490,142 @@ function handleFingerprint() {
 .unlock-form :deep(.el-input__wrapper.is-focus) {
   box-shadow: 0 0 0 1px var(--color-accent) inset;
 }
+
+
+/* 数据库选择器 */
+.db-selector-container {
+  width: 100%;
+  margin-top: 16px;
+  position: relative;
+}
+
+.db-selector-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  border-radius: 6px;
+  transition: background-color 0.2s;
+}
+
+.db-selector-trigger:hover {
+  background-color: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.db-name {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-icon {
+  transition: transform 0.2s;
+}
+
+.dropdown-icon.is-open {
+  transform: rotate(180deg);
+}
+
+.db-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  z-index: 100;
+  padding: 8px 0;
+}
+
+.db-list {
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.db-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--color-text-primary);
+}
+
+.db-item:hover {
+  background-color: var(--color-bg-hover);
+}
+
+.db-item.active {
+  color: var(--color-accent);
+}
+
+.check-icon {
+  margin-right: 8px;
+  font-size: 14px;
+  display: inline-flex;
+}
+
+.check-placeholder {
+  width: 22px;
+  display: inline-block;
+}
+
+.db-filename {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-divider {
+  height: 1px;
+  background-color: var(--color-border);
+  margin: 4px 0;
+}
+
+.db-action-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.db-action-item:hover {
+  background-color: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.db-action-input {
+  padding: 8px 12px;
+}
+
+/* 创建对话框 */
+.create-db-dialog :deep(.el-dialog__body) {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dialog-error {
+  text-align: left;
+  margin-top: -8px;
+}
+
 </style>

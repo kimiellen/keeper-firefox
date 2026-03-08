@@ -12,3 +12,4 @@ export { useBookmarksStore } from './bookmarks';
 export { useTagsStore } from './tags';
 
 export { useRelationsStore } from './relations';
+export { useDatabaseStore } from './database';
