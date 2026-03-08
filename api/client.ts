@@ -33,6 +33,11 @@ import type {
   ImportResponse,
   HealthResponse,
   KdfParams,
+  DatabaseListResponse,
+  DatabaseOpenRequest,
+  DatabaseOpenResponse,
+  DatabaseCreateRequest,
+  DatabaseCreateResponse,
 } from './types';
 
 const DEFAULT_BASE_URL = 'https://127.0.0.1:8443/api';
@@ -364,6 +369,25 @@ export class KeeperClient {
   async exportData(format: 'json' | 'csv' = 'json'): Promise<ExportResponse | string> {
     return this.request<ExportResponse | string>('GET', '/export', undefined, { format });
   }
+
+  // ============ 数据库管理 ============
+
+  /** 获取数据库列表 */
+  async listDatabases(): Promise<DatabaseListResponse> {
+    return this.request<DatabaseListResponse>('GET', '/db/list');
+  }
+
+  /** 打开已有数据库 */
+  async openDatabase(data: DatabaseOpenRequest): Promise<DatabaseOpenResponse> {
+    return this.request<DatabaseOpenResponse>('POST', '/db/open', data);
+  }
+
+  /** 创建新数据库 */
+  async createDatabase(data: DatabaseCreateRequest): Promise<DatabaseCreateResponse> {
+    return this.request<DatabaseCreateResponse>('POST', '/db/create', data);
+  }
+
+  // ============ 导入导出 ============
 
   /** 导入数据 */
   async importData(file: File, merge: boolean = false): Promise<ImportResponse> {

@@ -262,3 +262,37 @@ export interface HealthResponse {
   database: 'connected';
   timestamp: string;
 }
+
+// ============ 数据库管理 ============
+
+export interface DatabaseInfo {
+  path: string;
+  name: string;
+}
+
+export interface DatabaseListResponse {
+  databases: DatabaseInfo[];
+  current: string | null;
+}
+
+export interface DatabaseOpenRequest {
+  path: string;
+}
+
+export interface DatabaseOpenResponse {
+  message: string;
+  name: string;
+}
+
+export interface DatabaseCreateRequest {
+  path: string;
+  email: string;
+  masterPasswordHash: string;
+  encryptedUserKey: string;
+  kdfParams: KdfParams;
+}
+
+export interface DatabaseCreateResponse {
+  message: string;
+  name: string;
+}

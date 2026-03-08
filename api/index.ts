@@ -42,6 +42,12 @@ export type {
   ImportRequest,
   ImportResponse,
   HealthResponse,
+  DatabaseInfo,
+  DatabaseListResponse,
+  DatabaseOpenRequest,
+  DatabaseOpenResponse,
+  DatabaseCreateRequest,
+  DatabaseCreateResponse,
 } from './types';
 
 export { keeperClient } from './client';
