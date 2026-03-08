@@ -1,5 +1,7 @@
 import { keeperClient } from '../api/client';
 import type { Bookmark, BookmarkCreate } from '../api/types';
+import { certPinManager } from '../utils/security/certPinning';
+import type { CertVerifyResult } from '../utils/security/certPinning';
 
 interface MatchingBookmark {
   bookmarkId: string;
@@ -24,7 +26,10 @@ type KeeperMessage =
         includeSpecial: boolean;
       };
     }
-  | { type: 'MARK_AS_USED'; payload: { bookmarkId: string; url?: string; accountId?: number } };
+  | { type: 'MARK_AS_USED'; payload: { bookmarkId: string; url?: string; accountId?: number } }
+  | { type: 'TRUST_NEW_CERT'; payload: { fingerprint: string } }
+  | { type: 'GET_CERT_PIN_STATUS' }
+  | { type: 'CLEAR_CERT_PIN' };
 
 interface PasswordOptions {
   length: number;
@@ -229,6 +234,61 @@ async function handleMarkAsUsed(
 }
 
 /**
+ * 用户确认信任新证书指纹（证书到期换证时使用）。
+ */
+async function handleTrustNewCert(
+  payload: { fingerprint: string },
+  sendResponse: (response: { success?: boolean; error?: string }) => void,
+): Promise<void> {
+  try {
+    await certPinManager.trustNewFingerprint(payload.fingerprint);
+    sendResponse({ success: true });
+  } catch (error) {
+    sendResponse({ error: getErrorMessage(error) });
+  }
+}
+
+/**
+ * 获取当前证书固定状态（已固定指纹 + 更新日志）。
+ */
+async function handleGetCertPinStatus(
+  sendResponse: (response: {
+    pinned?: { fingerprint: string; pinnedAt: string; lastVerifiedAt: string } | null;
+    updateLog?: Array<{ updatedAt: string; reason: string }>;
+    error?: string;
+  }) => void,
+): Promise<void> {
+  try {
+    const pinned = await certPinManager.getPinnedInfo();
+    const updateLog = await certPinManager.getUpdateLog();
+
+    sendResponse({
+      pinned: pinned ?? null,
+      updateLog: updateLog.map((entry) => ({
+        updatedAt: entry.updatedAt,
+        reason: entry.reason,
+      })),
+    });
+  } catch (error) {
+    sendResponse({ error: getErrorMessage(error) });
+  }
+}
+
+/**
+ * 清除所有证书固定数据。
+ */
+async function handleClearCertPin(
+  sendResponse: (response: { success?: boolean; error?: string }) => void,
+): Promise<void> {
+  try {
+    await certPinManager.clearPinnedData();
+    sendResponse({ success: true });
+  } catch (error) {
+    sendResponse({ error: getErrorMessage(error) });
+  }
+}
+
+/**
  * 创建右键菜单并监听点击事件，向内容脚本发送生成密码消息。
  */
 function setupContextMenu(): void {
@@ -265,6 +325,26 @@ export default defineBackground({
   main() {
     setupContextMenu();
 
+    certPinManager.setEventListener({
+      onMismatch(expected, actual, requestId) {
+        console.error(
+          `[CertPin] 证书指纹不匹配 (request ${requestId}): 期望 ${expected}, 实际 ${actual}`,
+        );
+        void browser.runtime.sendMessage({
+          type: 'CERT_PIN_MISMATCH',
+          payload: { expected, actual },
+        });
+      },
+      onFirstUse(fingerprint) {
+        console.log(`[CertPin] 首次使用证书: ${fingerprint}`);
+      },
+      onError(message) {
+        console.error(`[CertPin] 错误: ${message}`);
+      },
+    });
+
+    certPinManager.start();
+
     browser.runtime.onMessage.addListener((message: KeeperMessage, _sender, sendResponse) => {
       switch (message.type) {
         case 'GET_AUTH_STATUS': {
@@ -289,6 +369,21 @@ export default defineBackground({
 
         case 'MARK_AS_USED': {
           void handleMarkAsUsed(message.payload, sendResponse);
+          return true;
+        }
+
+        case 'TRUST_NEW_CERT': {
+          void handleTrustNewCert(message.payload, sendResponse);
+          return true;
+        }
+
+        case 'GET_CERT_PIN_STATUS': {
+          void handleGetCertPinStatus(sendResponse);
+          return true;
+        }
+
+        case 'CLEAR_CERT_PIN': {
+          void handleClearCertPin(sendResponse);
           return true;
         }
 
