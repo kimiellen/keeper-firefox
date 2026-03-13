@@ -1,10 +1,37 @@
+# 构建产物
 node_modules/
 dist/
 dist_firefox/
 .output/
 .wxt/
-*.log
+dev/
+
+# 打包文件
+*.zip
+
+# 环境变量
 .env
 .env.local
+.env.*.local
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
 .DS_Store
+Thumbs.db
+
+# OpenCode / OMO
+.sisyphus/
+.opencode/
+.omo/
+
+# 临时测试文件
 test-crypto.html
