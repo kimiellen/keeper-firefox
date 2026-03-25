@@ -9,6 +9,7 @@ interface MatchingBookmark {
   accounts: Array<{
     id: number;
     username: string;
+    password?: string;
   }>;
 }
 
@@ -29,7 +30,8 @@ type KeeperMessage =
   | { type: 'MARK_AS_USED'; payload: { bookmarkId: string; url?: string; accountId?: number } }
   | { type: 'TRUST_NEW_CERT'; payload: { fingerprint: string } }
   | { type: 'GET_CERT_PIN_STATUS' }
-  | { type: 'CLEAR_CERT_PIN' };
+  | { type: 'CLEAR_CERT_PIN' }
+  | { type: 'LOCK_AND_HIDE' };
 
 interface PasswordOptions {
   length: number;
@@ -40,6 +42,7 @@ interface PasswordOptions {
 }
 
 const CONTEXT_MENU_ID = 'keeper-generate-password';
+let sidebarOpen = false;
 const LOWERCASE = 'abcdefghijklmnopqrstuvwxyz';
 const UPPERCASE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const NUMBERS = '0123456789';
@@ -160,17 +163,20 @@ async function handleGetMatchingBookmarks(
   sendResponse: (response: { bookmarks?: MatchingBookmark[]; error?: string }) => void,
 ): Promise<void> {
   try {
-    const bookmarksResult = await keeperClient.getBookmarks();
-    const bookmarks = bookmarksResult.data
-      .filter((bookmark) => isBookmarkMatchingHostname(bookmark, payload.url))
-      .map<MatchingBookmark>((bookmark) => ({
-        bookmarkId: bookmark.id,
-        name: bookmark.name,
-        accounts: bookmark.accounts.map((account) => ({
-          id: account.id,
-          username: account.username,
-        })),
-      }));
+    const bookmarksResult = await keeperClient.getBookmarks({ limit: 100 });
+    const matched = bookmarksResult.data.filter((bookmark) =>
+      isBookmarkMatchingHostname(bookmark, payload.url),
+    );
+
+    const bookmarks: MatchingBookmark[] = matched.map((bookmark) => ({
+      bookmarkId: bookmark.id,
+      name: bookmark.name,
+      accounts: bookmark.accounts.map((account) => ({
+        id: account.id,
+        username: account.username,
+        password: account.password,
+      })),
+    }));
 
     sendResponse({ bookmarks });
   } catch (error) {
@@ -180,20 +186,56 @@ async function handleGetMatchingBookmarks(
 
 /**
  * 保存新的站点账号凭据。
+ * 如果已有书签匹配当前 hostname，则追加账号或更新已有账号的密码；
+ * 否则新建书签。
  */
 async function handleSaveCredentials(
   payload: { url: string; username: string; password: string },
   sendResponse: (response: { success?: boolean; error?: string }) => void,
 ): Promise<void> {
   try {
-    const bookmarkData: BookmarkCreate = {
-      name: getHostname(payload.url),
-      urls: [{ url: payload.url }],
-      accounts: [{ username: payload.username, password: payload.password }],
-    };
+    const pageHostname = getHostname(payload.url);
 
-    await keeperClient.createBookmark(bookmarkData);
+    const bookmarksResult = await keeperClient.getBookmarks({ limit: 100 });
+    const existingBookmark = bookmarksResult.data.find((bookmark) =>
+      isBookmarkMatchingHostname(bookmark, payload.url),
+    );
+
+    if (existingBookmark) {
+      const normalizedUsername = payload.username.toLowerCase();
+      const existingAccount = existingBookmark.accounts.find(
+        (account) => account.username.toLowerCase() === normalizedUsername,
+      );
+
+      if (existingAccount) {
+        const updatedAccounts = existingBookmark.accounts.map((account) =>
+          account.username.toLowerCase() === normalizedUsername
+            ? { username: account.username, password: payload.password, relatedIds: account.relatedIds }
+            : { username: account.username, password: account.password, relatedIds: account.relatedIds },
+        );
+        await keeperClient.patchBookmark(existingBookmark.id, { accounts: updatedAccounts });
+      } else {
+        const allAccounts = existingBookmark.accounts.map((account) => ({
+          username: account.username,
+          password: account.password,
+          relatedIds: account.relatedIds,
+        }));
+        allAccounts.push({ username: payload.username, password: payload.password, relatedIds: [] });
+        await keeperClient.patchBookmark(existingBookmark.id, { accounts: allAccounts });
+      }
+    } else {
+      const bookmarkData: BookmarkCreate = {
+        name: pageHostname,
+        urls: [{ url: payload.url }],
+        accounts: [{ username: payload.username, password: payload.password }],
+      };
+      await keeperClient.createBookmark(bookmarkData);
+    }
+
     sendResponse({ success: true });
+
+    console.log('[Keeper:bg] SAVE_CREDENTIALS done, notifying via storage');
+    browser.storage.local.set({ bookmarkChangedAt: Date.now() }).catch(() => {});
   } catch (error) {
     sendResponse({ error: getErrorMessage(error) });
   }
@@ -343,7 +385,40 @@ export default defineBackground({
       },
     });
 
+    // cert pinning 仅在 HTTPS 模式下启用
+    // 开发环境使用 HTTP，URL pattern 不匹配所以不会拦截
     certPinManager.start();
+
+    browser.commands.onCommand.addListener(async (command) => {
+      if (command === 'toggle_sidebar') {
+        if (sidebarOpen) {
+          browser.sidebarAction.close();
+          sidebarOpen = false;
+          keeperClient.lock().catch(() => {});
+        } else {
+          browser.sidebarAction.open();
+          sidebarOpen = true;
+        }
+        return;
+      }
+
+      if (command !== 'fill_credentials') {
+        return;
+      }
+
+      try {
+        const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+        console.log('[Keeper:bg] active tab:', tab?.id, tab?.url);
+        if (!tab?.id) {
+          return;
+        }
+
+        await browser.tabs.sendMessage(tab.id, { type: 'FILL_FROM_SHORTCUT' });
+        console.log('[Keeper:bg] FILL_FROM_SHORTCUT sent to tab', tab.id);
+      } catch (err) {
+        console.error('[Keeper:bg] sendMessage failed:', err);
+      }
+    });
 
     browser.runtime.onMessage.addListener((message: KeeperMessage, _sender, sendResponse) => {
       switch (message.type) {

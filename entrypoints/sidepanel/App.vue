@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useAuthStore } from '../../stores/auth';
 import { useSettingsStore } from '../../stores/settings';
 import type { Bookmark } from '../../api/types';
@@ -10,41 +10,87 @@ import BookmarkEditView from './views/BookmarkEdit.vue';
 import SettingsView from './views/Settings.vue';
 
 type ViewName = 'unlock' | 'main' | 'edit' | 'settings';
-
 const authStore = useAuthStore();
 const settingsStore = useSettingsStore();
 
-const currentView = ref<ViewName>('unlock');
+const currentView = ref<ViewName | null>(null);
 const editingBookmark = ref<Bookmark | null>(null);
 
-// 初始化主题
+let sessionCheckInterval: ReturnType<typeof setInterval> | null = null;
+let unlockTimestamp = 0;
+
+function startSessionCheck(): void {
+  stopSessionCheck();
+  unlockTimestamp = Date.now();
+  sessionCheckInterval = setInterval(async () => {
+    if (!authStore.locked) {
+      const elapsed = Date.now() - unlockTimestamp;
+      const timeoutMs = settingsStore.settings.sessionTimeout * 60 * 1000;
+      if (elapsed >= timeoutMs) {
+        await authStore.lock();
+      }
+    }
+  }, 60 * 1000);
+}
+
+function stopSessionCheck(): void {
+  if (sessionCheckInterval !== null) {
+    clearInterval(sessionCheckInterval);
+    sessionCheckInterval = null;
+  }
+}
+
+function handleLockAndHide(message: { type: string }): void {
+  if (message.type === 'LOCK_AND_HIDE' && !authStore.locked) {
+    void authStore.lock();
+  }
+}
+
 onMounted(async () => {
   settingsStore.initTheme();
 
-  // 检查认证状态
   try {
     await authStore.checkStatus();
     if (!authStore.locked) {
       currentView.value = 'main';
+      startSessionCheck();
+    } else {
+      currentView.value = 'unlock';
     }
   } catch {
-    // 未初始化或已锁定，停留在解锁页
+    currentView.value = 'unlock';
   }
+
+  browser.runtime.onMessage.addListener(handleLockAndHide);
 });
 
-// 监听锁定状态
+onUnmounted(() => {
+  stopSessionCheck();
+  browser.runtime.onMessage.removeListener(handleLockAndHide);
+});
+
 watch(
   () => authStore.locked,
   (locked) => {
     if (locked) {
       currentView.value = 'unlock';
+      stopSessionCheck();
     }
   }
 );
 
-// 导航方法
+watch(
+  () => settingsStore.settings.sessionTimeout,
+  () => {
+    if (!authStore.locked) {
+      startSessionCheck();
+    }
+  }
+);
+
 function onUnlocked() {
   currentView.value = 'main';
+  startSessionCheck();
 }
 
 function onEdit(bookmark: Bookmark | null) {
@@ -66,11 +112,6 @@ function goSettings() {
 
 function goBack() {
   currentView.value = 'main';
-}
-
-function onLock() {
-  authStore.lock();
-  currentView.value = 'unlock';
 }
 </script>
 
@@ -94,7 +135,6 @@ function onLock() {
     <SettingsView
       v-else-if="currentView === 'settings'"
       @back="goBack"
-      @lock="onLock"
     />
   </div>
 </template>
@@ -116,8 +156,6 @@ function onLock() {
   --color-accent-hover: #c0392b;
   --color-accent-soft: #fff0f0;
   --color-input-bg: #ffffff;
-  --color-tag-bg: #e74c3c;
-  --color-tag-text: #ffffff;
 }
 
 /* CSS 变量 - 暗色主题 */
@@ -136,8 +174,6 @@ function onLock() {
   --color-accent-hover: #ff5a4a;
   --color-accent-soft: #3d2020;
   --color-input-bg: #333333;
-  --color-tag-bg: #e74c3c;
-  --color-tag-text: #ffffff;
 }
 
 /* 全局重置 */

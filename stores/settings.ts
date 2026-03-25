@@ -45,7 +45,7 @@ const DEFAULT_SETTINGS: SettingsState = {
     length: 8,
     includeNumbers: true,
   },
-  sessionTimeout: 60, // 1 hour
+  sessionTimeout: 10, // 10 minutes
 };
 
 /**

@@ -1,13 +1,9 @@
-/**
- * API 模块导出
- */
-
 export { KeeperClient, KeeperApiError, type KeeperClientOptions } from './client';
 export type {
   ApiError,
   ApiFieldError,
   PaginatedResponse,
-  KdfParams,
+  AuthInfoResponse,
   InitializeRequest,
   InitializeResponse,
   UnlockRequest,
@@ -41,6 +37,10 @@ export type {
   ExportResponse,
   ImportRequest,
   ImportResponse,
+  ImportPreviewResponse,
+  ImportConflict,
+  ImportCounts,
+  ImportSkipped,
   HealthResponse,
   DatabaseInfo,
   DatabaseListResponse,

@@ -5,8 +5,9 @@ import { useTagsStore } from '../../../stores/tags';
 import { useRelationsStore } from '../../../stores/relations';
 import { useSettingsStore } from '../../../stores/settings';
 import type { Bookmark } from '../../../api/types';
-import { ElMessage } from 'element-plus';
-import { Back, Close, Plus } from '@element-plus/icons-vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { Back, Close, Plus, Delete } from '@element-plus/icons-vue';
+import { toSoftBackground } from '../../../utils/tagColors';
 
 const props = defineProps<{
   bookmark: Bookmark | null;
@@ -23,7 +24,14 @@ const relationsStore = useRelationsStore();
 const settingsStore = useSettingsStore();
 
 const isLoading = ref(false);
+const isDeleting = ref(false);
 const isEdit = computed(() => !!props.bookmark);
+
+function formatDateTime(dateStr?: string): string {
+  if (!dateStr) return '-';
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 // 表单数据
 const name = ref('');
@@ -32,6 +40,16 @@ const selectedTags = ref<number[]>([]);
 const selectedRelations = ref<number[]>([]);
 const urls = ref<{ url: string; lastUsed?: string }[]>([{ url: '' }]);
 const accounts = ref<{ username: string; password: string; relatedIds?: number[] }[]>([{ username: '', password: '' }]);
+
+function getTagColor(tagId: number): string {
+  const tag = tagsStore.tags.find(t => t.id === tagId);
+  return tag?.color || '#9CA3AF';
+}
+
+function getTagName(tagId: number): string {
+  const tag = tagsStore.tags.find(t => t.id === tagId);
+  return tag?.name || String(tagId);
+}
 
 // 初始化
 onMounted(async () => {
@@ -45,12 +63,18 @@ onMounted(async () => {
     notes.value = props.bookmark.notes || '';
     selectedTags.value = props.bookmark.tagIds || [];
     urls.value = props.bookmark.urls?.length ? [...props.bookmark.urls] : [{ url: '' }];
-    accounts.value = props.bookmark.accounts?.length 
-      ? props.bookmark.accounts.map(a => ({ username: a.username, password: a.password }))
-      : [{ username: '', password: '' }];
-      
-    if (props.bookmark.accounts?.length && props.bookmark.accounts[0].relatedIds) {
-      selectedRelations.value = [...props.bookmark.accounts[0].relatedIds];
+
+    if (props.bookmark.accounts?.length) {
+      accounts.value = props.bookmark.accounts.map(a => ({
+        username: a.username,
+        password: a.password,
+      }));
+
+      if (props.bookmark.accounts[0].relatedIds) {
+        selectedRelations.value = [...props.bookmark.accounts[0].relatedIds];
+      }
+    } else {
+      accounts.value = [{ username: '', password: '' }];
     }
   }
 });
@@ -125,6 +149,16 @@ function generatePasswordFor(index: number) {
   accounts.value[index].password = password;
 }
 
+function buildAccounts(
+  rawAccounts: { username: string; password: string }[]
+): { username: string; password: string; relatedIds: number[] }[] {
+  return rawAccounts.map(a => ({
+    username: a.username.trim(),
+    password: a.password.trim(),
+    relatedIds: selectedRelations.value,
+  }));
+}
+
 // 保存
 async function handleSave() {
   if (!name.value.trim()) {
@@ -135,6 +169,11 @@ async function handleSave() {
   isLoading.value = true;
 
   try {
+    const filteredAccounts = accounts.value.filter(a => a.username.trim() || a.password.trim());
+    const builtAccounts = filteredAccounts.length > 0
+      ? buildAccounts(filteredAccounts)
+      : [];
+
     const bookmarkData = {
       name: name.value.trim(),
       notes: notes.value.trim() || undefined,
@@ -143,18 +182,22 @@ async function handleSave() {
         url: u.url.trim(),
         lastUsed: u.lastUsed
       })),
-      accounts: accounts.value.filter(a => a.username.trim() || a.password.trim()).map(a => ({
-        username: a.username.trim(),
-        password: a.password.trim(),
-        relatedIds: selectedRelations.value
-      }))
+      accounts: builtAccounts,
     };
 
     if (isEdit.value && props.bookmark?.id) {
-      await bookmarksStore.updateBookmark(props.bookmark.id, bookmarkData);
+      const result = await bookmarksStore.updateBookmark(props.bookmark.id, bookmarkData);
+      if (!result) {
+        ElMessage.error(bookmarksStore.error || '保存失败');
+        return;
+      }
       ElMessage.success('保存成功');
     } else {
-      await bookmarksStore.createBookmark(bookmarkData);
+      const result = await bookmarksStore.createBookmark(bookmarkData);
+      if (!result) {
+        ElMessage.error(bookmarksStore.error || '添加失败');
+        return;
+      }
       ElMessage.success('添加成功');
     }
 
@@ -166,6 +209,42 @@ async function handleSave() {
     isLoading.value = false;
   }
 }
+
+// 删除
+async function handleDelete() {
+  if (!props.bookmark?.id) return;
+
+  try {
+    await ElMessageBox.confirm(
+      '确定要删除该书签吗？此操作不可撤销。',
+      '删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      }
+    );
+  } catch {
+    return; // 用户取消
+  }
+
+  isDeleting.value = true;
+  try {
+    const result = await bookmarksStore.deleteBookmark(props.bookmark.id);
+    if (!result) {
+      ElMessage.error(bookmarksStore.error || '删除失败');
+      return;
+    }
+    ElMessage.success('删除成功');
+    emit('saved');
+  } catch (e) {
+    console.error('删除失败', e);
+    ElMessage.error('删除失败');
+  } finally {
+    isDeleting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -174,7 +253,7 @@ async function handleSave() {
     <div class="edit-header">
       <el-button class="back-btn" :icon="Back" circle text @click="emit('cancel')" />
       <h2>{{ isEdit ? '编辑书签' : '新增书签' }}</h2>
-      <el-button type="primary" size="small" :loading="isLoading" @click="handleSave">
+      <el-button type="primary" plain class="save-btn" size="small" :loading="isLoading" @click="handleSave">
         保存
       </el-button>
     </div>
@@ -221,7 +300,6 @@ async function handleSave() {
                   <el-input
                     v-model="account.username"
                     placeholder="用户名"
-                    readonly
                   >
                     <template #append>
                       <el-button @click="generateUsernameFor(index)">生成</el-button>
@@ -232,7 +310,6 @@ async function handleSave() {
                     v-model="account.password"
                     type="password"
                     placeholder="密码"
-                    readonly
                     show-password
                   >
                     <template #append>
@@ -249,6 +326,47 @@ async function handleSave() {
         </div>
       </div>
       
+      <!-- 标签 -->
+      <div class="form-group">
+        <label>标签</label>
+        <el-select
+          v-model="selectedTags"
+          multiple
+          filterable
+          placeholder="请选择标签"
+          class="full-width"
+        >
+          <el-option
+            v-for="tag in tagsStore.tags"
+            :key="tag.id"
+            :label="tag.name"
+            :value="tag.id"
+          >
+            <span class="tag-option">
+              <span class="tag-color-dot" :style="{ backgroundColor: getTagColor(tag.id) }"></span>
+              {{ tag.name }}
+            </span>
+          </el-option>
+          <template #tag>
+            <el-tag
+              v-for="tagId in selectedTags"
+              :key="tagId"
+              effect="plain"
+              :style="{
+                '--el-tag-bg-color': toSoftBackground(getTagColor(tagId)),
+                '--el-tag-border-color': getTagColor(tagId),
+                '--el-tag-text-color': getTagColor(tagId),
+                '--el-tag-hover-color': getTagColor(tagId),
+              }"
+              closable
+              @close="selectedTags = selectedTags.filter(id => id !== tagId)"
+            >
+              {{ getTagName(tagId) }}
+            </el-tag>
+          </template>
+        </el-select>
+      </div>
+
       <!-- 关联 -->
       <div class="form-group">
         <label>关联</label>
@@ -268,25 +386,6 @@ async function handleSave() {
         </el-select>
       </div>
 
-      <!-- 标签 -->
-      <div class="form-group">
-        <label>标签</label>
-        <el-select
-          v-model="selectedTags"
-          multiple
-          filterable
-          placeholder="请选择标签"
-          class="full-width"
-        >
-          <el-option
-            v-for="tag in tagsStore.tags"
-            :key="tag.id"
-            :label="tag.name"
-            :value="tag.id"
-          />
-        </el-select>
-      </div>
-
       <!-- 备注 -->
       <div class="form-group">
         <label>备注</label>
@@ -296,6 +395,38 @@ async function handleSave() {
           placeholder="请输入备注"
           :rows="3"
         />
+      </div>
+
+      <!-- 时间信息（仅编辑模式显示） -->
+      <div v-if="isEdit && props.bookmark" class="form-group time-info">
+        <label>时间信息</label>
+        <div class="time-fields">
+          <div class="time-row">
+            <span class="time-label">创建时间</span>
+            <span class="time-value">{{ formatDateTime(props.bookmark.createdAt) }}</span>
+          </div>
+          <div class="time-row">
+            <span class="time-label">修改时间</span>
+            <span class="time-value">{{ formatDateTime(props.bookmark.updatedAt) }}</span>
+          </div>
+          <div class="time-row">
+            <span class="time-label">最后使用</span>
+            <span class="time-value">{{ formatDateTime(props.bookmark.lastUsedAt) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 删除（仅编辑模式显示） -->
+      <div v-if="isEdit && props.bookmark" class="delete-section">
+        <el-button
+          type="danger"
+          plain
+          :icon="Delete"
+          :loading="isDeleting"
+          @click="handleDelete"
+        >
+          删除书签
+        </el-button>
       </div>
     </div>
   </div>
@@ -413,5 +544,71 @@ async function handleSave() {
 
 .remove-account-btn {
   margin-top: 4px;
+}
+
+.time-info .time-fields {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  padding: 12px;
+  background: var(--el-fill-color-blank);
+}
+
+.time-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.time-row + .time-row {
+  border-top: 1px dashed var(--el-border-color-lighter);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+.time-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.time-value {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  font-variant-numeric: tabular-nums;
+}
+
+.tag-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* 标签选择器中已选标签的关闭按钮 hover 样式 */
+:deep(.el-select .el-tag .el-tag__close:hover) {
+  color: #fff;
+}
+
+.delete-section {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--el-border-color-light);
+}
+
+.delete-section .el-button {
+  width: 100%;
+}
+
+.save-btn:hover,
+.save-btn:focus {
+  background-color: var(--el-color-primary) !important;
+  border-color: var(--el-color-primary) !important;
+  color: #fff !important;
 }
 </style>

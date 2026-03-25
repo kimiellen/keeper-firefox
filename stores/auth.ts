@@ -1,13 +1,13 @@
 /**
  * 认证 Store
  *
- * 管理用户解锁/锁定状态，与 KeyManager 和 API 客户端集成
+ * 管理用户解锁/锁定状态，与 API 客户端集成。
+ * 方案B：纯后端加密，前端直接发送明文密码，不做任何本地加解密。
  */
 
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { keeperClient, KeeperApiError, type UnlockResponse, type KdfParams } from '../api';
-import { keyManager, KeyManager, type KdfParams as CryptoKdfParams } from '../utils/crypto';
+import { keeperClient, KeeperApiError } from '../api';
 
 export const useAuthStore = defineStore('auth', () => {
   // === State ===
@@ -62,13 +62,6 @@ export const useAuthStore = defineStore('auth', () => {
         sessionExpiresAt.value = 'sessionExpiresAt' in status 
           ? status.sessionExpiresAt 
           : null;
-        
-        // 尝试从 session storage 恢复密钥
-        const restored = keyManager.restoreFromSession();
-        if (!restored) {
-          // 需要重新解锁
-          locked.value = true;
-        }
       }
     } catch (e) {
       locked.value = true;
@@ -78,36 +71,13 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 初始化（首次使用） */
-  async function initialize(
-    email: string,
-    masterPasswordHash: string,
-    kdfParams: CryptoKdfParams
-  ): Promise<void> {
+  /** 初始化（首次使用），直接发送明文密码给后端 */
+  async function initialize(email: string, password: string): Promise<void> {
     loading.value = true;
     error.value = null;
     
     try {
-      // 生成加密的用户密钥
-      const { encryptedUserKey } = await KeyManager.createEncryptedUserKey(
-        masterPasswordHash,
-        email
-      );
-      
-      // 调用 API 初始化
-      await keeperClient.initialize({
-        email,
-        masterPasswordHash,
-        encryptedUserKey,
-        kdfParams: {
-          algorithm: kdfParams.algorithm,
-          memory: kdfParams.memory,
-          iterations: kdfParams.iterations,
-          parallelism: kdfParams.parallelism,
-          salt: kdfParams.salt,
-        },
-      });
-      
+      await keeperClient.initialize({ email, password });
       isInitialized.value = true;
     } catch (e) {
       if (e instanceof KeeperApiError) {
@@ -121,32 +91,15 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 解锁（登录） */
-  async function unlock(masterPasswordHash: string): Promise<void> {
+  /** 解锁（登录），直接发送明文密码给后端 */
+  async function unlock(password: string): Promise<void> {
     loading.value = true;
     error.value = null;
     
     try {
-      // 调用 API 解锁
-      const response: UnlockResponse = await keeperClient.unlock({
-        masterPasswordHash,
-      });
-      
-      // 使用 KeyManager 解密用户密钥
-      const kdfParams: CryptoKdfParams = {
-        algorithm: response.kdfParams.algorithm,
-        memory: response.kdfParams.memory,
-        iterations: response.kdfParams.iterations,
-        parallelism: response.kdfParams.parallelism,
-        salt: response.kdfParams.salt,
-      };
-      
-      await keyManager.initialize(response.encryptedUserKey, kdfParams);
-      await keyManager.unlock(masterPasswordHash);
-      
+      await keeperClient.unlock({ password });
       locked.value = false;
-      sessionExpiresAt.value = null; // API 会返回新的 session
-      
+      sessionExpiresAt.value = null;
     } catch (e) {
       if (e instanceof KeeperApiError) {
         error.value = e.detail;
@@ -166,15 +119,9 @@ export const useAuthStore = defineStore('auth', () => {
     
     try {
       await keeperClient.lock();
-      keyManager.lock();
-      locked.value = true;
-      sessionExpiresAt.value = null;
-    } catch (e) {
-      // 即使 API 调用失败，也要清除本地状态
-      keyManager.lock();
-      locked.value = true;
-      sessionExpiresAt.value = null;
     } finally {
+      locked.value = true;
+      sessionExpiresAt.value = null;
       loading.value = false;
     }
   }
@@ -190,7 +137,6 @@ export const useAuthStore = defineStore('auth', () => {
     loading.value = false;
     error.value = null;
     sessionExpiresAt.value = null;
-    keyManager.lock();
   }
 
   return {

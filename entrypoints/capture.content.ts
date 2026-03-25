@@ -13,11 +13,17 @@ export default defineContentScript({
 
     type BookmarkAccount = {
       username?: string;
+      password?: string;
     };
 
     type BookmarkItem = {
       accounts?: BookmarkAccount[];
     };
+
+    const KEEPER_FILLED_ATTR = 'data-keeper-filled';
+
+    /** 凭据检查结果：不存在 / 已存在且密码相同 / 已存在但密码不同 */
+    type CredentialCheckResult = 'not_found' | 'same_password' | 'different_password';
 
     const capturedSessionKeys = new Set<string>();
     const observedForms = new WeakSet<HTMLFormElement>();
@@ -25,6 +31,44 @@ export default defineContentScript({
 
     let lastPasswordInteraction = 0;
     let lastInteractedForm: HTMLFormElement | null = null;
+
+    /**
+     * 记忆最近输入过的用户名，用于支持多步骤登录表单。
+     * 当用户名和密码在不同页面/步骤输入时，密码步骤可能找不到用户名字段，
+     * 此时使用该缓存值。
+     * 使用 sessionStorage 持久化，防止页面导航或 content script 重新注入后丢失。
+     */
+    const REMEMBERED_USERNAME_KEY = '__keeper_remembered_username__';
+    const REMEMBERED_USERNAME_TS_KEY = '__keeper_remembered_username_ts__';
+    /** 记忆用户名的有效期（5 分钟） */
+    const REMEMBERED_USERNAME_TTL = 5 * 60 * 1000;
+
+    const loadRememberedUsername = (): { value: string; timestamp: number } => {
+      try {
+        const value = sessionStorage.getItem(REMEMBERED_USERNAME_KEY) ?? '';
+        const timestamp = Number(sessionStorage.getItem(REMEMBERED_USERNAME_TS_KEY) ?? '0');
+        return { value, timestamp };
+      } catch {
+        return { value: '', timestamp: 0 };
+      }
+    };
+
+    const saveRememberedUsername = (username: string): void => {
+      try {
+        sessionStorage.setItem(REMEMBERED_USERNAME_KEY, username);
+        sessionStorage.setItem(REMEMBERED_USERNAME_TS_KEY, String(Date.now()));
+      } catch {
+        // sessionStorage 不可用时静默降级
+      }
+    };
+
+    const getRememberedUsername = (): string => {
+      const { value, timestamp } = loadRememberedUsername();
+      if (value && Date.now() - timestamp < REMEMBERED_USERNAME_TTL) {
+        return value;
+      }
+      return '';
+    };
 
     let observer: MutationObserver | null = null;
     let observerTimer: number | null = null;
@@ -136,6 +180,9 @@ export default defineContentScript({
         if (hasIgnoredFieldKeyword(fieldIdentity)) {
           continue;
         }
+        if (field.hasAttribute(KEEPER_FILLED_ATTR)) {
+          continue;
+        }
         return field;
       }
 
@@ -166,11 +213,90 @@ export default defineContentScript({
       }
 
       const usernameField = findUsernameField(form);
-      if (!usernameField) {
+      let username = usernameField?.value.trim() ?? '';
+
+      if (!username) {
+        const remembered = getRememberedUsername();
+        if (remembered) {
+          username = remembered;
+        }
+      }
+
+      if (!username) {
         return null;
       }
 
-      const username = usernameField.value.trim();
+      return { username, password };
+    };
+
+    /**
+     * 在整个页面范围内搜索可见密码字段和用户名字段，用于无 <form> 包裹的场景。
+     * 多步骤登录（如 NAS 管理界面）或 SPA 中密码字段可能不在 form 标签内。
+     */
+    const extractCredentialsFromPage = (): ExtractedCredential | null => {
+      const passwordFields = Array.from(
+        document.querySelectorAll<HTMLInputElement>('input[type="password"]'),
+      ).filter(
+        (field) => !field.disabled && field.type !== 'hidden' && field.offsetParent !== null,
+      );
+
+      if (passwordFields.length === 0) {
+        return null;
+      }
+
+      let selectedPasswordField: HTMLInputElement | null = null;
+      for (const field of passwordFields) {
+        const fieldIdentity = `${field.name} ${field.id}`;
+        if (hasIgnoredFieldKeyword(fieldIdentity)) {
+          continue;
+        }
+        if (field.hasAttribute(KEEPER_FILLED_ATTR)) {
+          continue;
+        }
+        selectedPasswordField = field;
+        break;
+      }
+
+      if (!selectedPasswordField) {
+        return null;
+      }
+
+      const password = selectedPasswordField.value.trim();
+      if (password.length < 4 || looksLikeOtp(password)) {
+        return null;
+      }
+
+      const usernameSelectors = [
+        'input[autocomplete="username"]',
+        'input[type="email"]',
+        'input[name*="user" i]',
+        'input[name*="email" i]',
+        'input[name*="login" i]',
+        'input[type="text"]',
+      ];
+
+      let username = '';
+      for (const selector of usernameSelectors) {
+        const candidate = document.querySelector<HTMLInputElement>(selector);
+        if (
+          candidate &&
+          candidate !== selectedPasswordField &&
+          !candidate.disabled &&
+          candidate.type !== 'hidden' &&
+          candidate.value.trim()
+        ) {
+          username = candidate.value.trim();
+          break;
+        }
+      }
+
+      if (!username) {
+        const remembered = getRememberedUsername();
+        if (remembered) {
+          username = remembered;
+        }
+      }
+
       if (!username) {
         return null;
       }
@@ -394,9 +520,11 @@ export default defineContentScript({
         try {
           await browser.runtime.sendMessage({
             type: 'SAVE_CREDENTIALS',
-            url: window.location.href,
-            username,
-            password,
+            payload: {
+              url: window.location.href,
+              username,
+              password,
+            },
           });
         } catch {
           // 忽略保存阶段错误，避免阻断页面交互。
@@ -425,14 +553,16 @@ export default defineContentScript({
       }, 15000);
     };
 
-    /**
-     * 查询背景脚本判断该用户名是否已存在。
-     */
-    const checkCredentialExists = async (username: string): Promise<boolean> => {
+    const checkCredentialStatus = async (
+      username: string,
+      password: string,
+    ): Promise<CredentialCheckResult> => {
       try {
         const response = (await browser.runtime.sendMessage({
           type: 'GET_MATCHING_BOOKMARKS',
-          url: window.location.href,
+          payload: {
+            url: window.location.href,
+          },
         })) as { bookmarks?: BookmarkItem[] };
 
         const bookmarks = Array.isArray(response?.bookmarks) ? response.bookmarks : [];
@@ -443,15 +573,15 @@ export default defineContentScript({
           for (const account of accounts) {
             const accountUsername = (account.username ?? '').trim().toLowerCase();
             if (accountUsername && accountUsername === normalizedUsername) {
-              return true;
+              return account.password === password ? 'same_password' : 'different_password';
             }
           }
         }
       } catch {
-        // 忽略查询错误，不影响后续是否提示。
+        // 查询失败时默认当作新凭据处理
       }
 
-      return false;
+      return 'not_found';
     };
 
     /**
@@ -474,8 +604,36 @@ export default defineContentScript({
 
       capturedSessionKeys.add(sessionKey);
 
-      const isUpdate = await checkCredentialExists(extracted.username);
-      await showNotificationBar(extracted.username, extracted.password, isUpdate);
+      const status = await checkCredentialStatus(extracted.username, extracted.password);
+      if (status === 'same_password') {
+        return;
+      }
+
+      await showNotificationBar(extracted.username, extracted.password, status === 'different_password');
+    };
+
+    /**
+     * 无 form 包裹时从整个页面提取凭据并触发通知展示，自动去重。
+     */
+    const processPageCredential = async (): Promise<void> => {
+      const extracted = extractCredentialsFromPage();
+      if (!extracted) {
+        return;
+      }
+
+      const sessionKey = `${window.location.href}::${extracted.username.toLowerCase()}`;
+      if (capturedSessionKeys.has(sessionKey)) {
+        return;
+      }
+
+      capturedSessionKeys.add(sessionKey);
+
+      const status = await checkCredentialStatus(extracted.username, extracted.password);
+      if (status === 'same_password') {
+        return;
+      }
+
+      await showNotificationBar(extracted.username, extracted.password, status === 'different_password');
     };
 
     /**
@@ -493,6 +651,39 @@ export default defineContentScript({
 
       lastPasswordInteraction = Date.now();
       lastInteractedForm = target.form;
+    };
+
+    const usernameSelectors = [
+      'input[autocomplete="username"]',
+      'input[type="email"]',
+      'input[name*="user" i]',
+      'input[name*="email" i]',
+      'input[name*="login" i]',
+      'input[name*="account" i]',
+    ];
+
+    const isUsernameField = (el: HTMLInputElement): boolean => {
+      return usernameSelectors.some((s) => el.matches(s));
+    };
+
+    const onUsernameInteraction = (event: Event): void => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) {
+        return;
+      }
+
+      if (target.type === 'password' || target.type === 'hidden') {
+        return;
+      }
+
+      if (!isUsernameField(target)) {
+        return;
+      }
+
+      const value = target.value.trim();
+      if (value) {
+        saveRememberedUsername(value);
+      }
     };
 
     /**
@@ -516,18 +707,19 @@ export default defineContentScript({
         return;
       }
 
-      const submitLikeControl = target.closest('button, input[type="submit"]');
+      const submitLikeControl = target.closest('button, input[type="submit"], [role="button"]');
       if (!submitLikeControl) {
         return;
       }
 
       const form = submitLikeControl.closest('form');
-      if (!form) {
-        return;
-      }
 
       window.setTimeout(() => {
-        void processFormCredential(form);
+        if (form) {
+          void processFormCredential(form);
+        } else {
+          void processPageCredential();
+        }
       }, 0);
     };
 
@@ -547,6 +739,8 @@ export default defineContentScript({
 
       if (candidateForm) {
         void processFormCredential(candidateForm);
+      } else {
+        void processPageCredential();
       }
     };
 
@@ -582,11 +776,37 @@ export default defineContentScript({
       }
     };
 
+    /**
+     * 密码字段按 Enter 键时尝试捕获凭据。
+     */
+    const onKeydown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== 'password') {
+        return;
+      }
+
+      const form = target.closest('form');
+      window.setTimeout(() => {
+        if (form) {
+          void processFormCredential(form);
+        } else {
+          void processPageCredential();
+        }
+      }, 0);
+    };
+
     bindEvent(document, 'submit', onDocumentSubmit, { capture: true });
     bindEvent(document, 'click', onDocumentClick, { capture: true });
+    bindEvent(document, 'keydown', onKeydown, { capture: true });
     bindEvent(document, 'focusin', onPasswordInteraction, { capture: true });
     bindEvent(document, 'input', onPasswordInteraction, { capture: true });
     bindEvent(document, 'change', onPasswordInteraction, { capture: true });
+    bindEvent(document, 'input', onUsernameInteraction, { capture: true });
+    bindEvent(document, 'change', onUsernameInteraction, { capture: true });
 
     bindExistingForms();
 

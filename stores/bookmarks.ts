@@ -311,6 +311,21 @@ export const useBookmarksStore = defineStore('bookmarks', () => {
     };
   }
 
+  let listening = false;
+
+  function startListening(): void {
+    if (listening) return;
+    listening = true;
+    console.log('[Keeper:store] startListening registered');
+    browser.storage.onChanged.addListener((changes, area) => {
+      console.log('[Keeper:store] storage.onChanged fired', area, Object.keys(changes));
+      if (area === 'local' && changes.bookmarkChangedAt) {
+        console.log('[Keeper:store] bookmarkChangedAt changed, fetching bookmarks');
+        void fetchBookmarks();
+      }
+    });
+  }
+
   return {
     // State
     bookmarks,
@@ -337,5 +352,6 @@ export const useBookmarksStore = defineStore('bookmarks', () => {
     markAsUsed,
     clearError,
     reset,
+    startListening,
   };
 });

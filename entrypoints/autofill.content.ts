@@ -33,23 +33,56 @@ export default defineContentScript({
       account: MatchingAccount;
     }
 
-    interface IconHandle {
-      host: HTMLDivElement;
-      button: HTMLButtonElement;
-      passwordField: HTMLInputElement;
-      clickHandler: (event: MouseEvent) => void;
-    }
-
     interface DropdownHandle {
       host: HTMLDivElement;
       onOutsideClick: (event: MouseEvent) => void;
-      onEscape: (event: KeyboardEvent) => void;
+      onKeyNav: (event: KeyboardEvent) => void;
+      selectedIndex: number;
+      items: HTMLButtonElement[];
     }
 
-    const iconHandles = new Map<HTMLInputElement, IconHandle>();
     let activeDropdown: DropdownHandle | null = null;
-    let mutationObserver: MutationObserver | null = null;
-    let debounceTimer: number | null = null;
+
+    const FILL_ANIMATION_CLASS = "keeper-animated-fill";
+    const FILL_ANIMATION_DURATION = 300;
+
+    function injectFillAnimationStyle(): HTMLStyleElement | null {
+      if (!document.head) {
+        return null;
+      }
+
+      const style = document.createElement("style");
+      style.textContent = `
+        @keyframes keeperfill {
+          0% { transform: scale(1, 1); }
+          40% { transform: scale(1.06, 1.10); }
+          100% { transform: scale(1, 1); }
+        }
+        .${FILL_ANIMATION_CLASS} {
+          animation: keeperfill ${FILL_ANIMATION_DURATION}ms ease-in-out 0ms 1;
+        }
+        @media (prefers-reduced-motion) {
+          .${FILL_ANIMATION_CLASS} {
+            animation: none;
+          }
+        }
+      `;
+
+      document.head.appendChild(style);
+      return style;
+    }
+
+    const fillAnimationStyle = injectFillAnimationStyle();
+
+    function playFillAnimation(field: HTMLInputElement): void {
+      field.classList.remove(FILL_ANIMATION_CLASS);
+      void field.offsetWidth;
+      field.classList.add(FILL_ANIMATION_CLASS);
+
+      setTimeout(() => {
+        field.classList.remove(FILL_ANIMATION_CLASS);
+      }, FILL_ANIMATION_DURATION);
+    }
 
     /**
      * 安全发送消息到后台脚本。
@@ -203,11 +236,24 @@ export default defineContentScript({
     /**
      * 设置字段值并触发前端框架所需事件。
      */
+    const KEEPER_FILLED_ATTR = "data-keeper-filled";
+
     function setFieldValue(field: HTMLInputElement, value: string): void {
       field.focus();
       field.value = value;
       field.dispatchEvent(new Event("input", { bubbles: true }));
       field.dispatchEvent(new Event("change", { bubbles: true }));
+      playFillAnimation(field);
+
+      if (field.type.toLowerCase() === "password") {
+        field.setAttribute(KEEPER_FILLED_ATTR, "1");
+
+        const onManualInput = (): void => {
+          field.removeAttribute(KEEPER_FILLED_ATTR);
+          field.removeEventListener("input", onManualInput);
+        };
+        field.addEventListener("input", onManualInput);
+      }
     }
 
     /**
@@ -229,23 +275,12 @@ export default defineContentScript({
 
       const response = await sendRuntimeMessage<MatchingBookmarksResponse>({
         type: "GET_MATCHING_BOOKMARKS",
-        url: window.location.href,
+        payload: {
+          url: window.location.href,
+        },
       });
 
       return response?.bookmarks ?? [];
-    }
-
-    /**
-     * 计算并设置图标位置（密码框右侧内部）。
-     */
-    function positionIcon(handle: IconHandle): void {
-      const rect = handle.passwordField.getBoundingClientRect();
-      const size = 20;
-      const top = window.scrollY + rect.top + Math.max((rect.height - size) / 2, 0);
-      const left = window.scrollX + rect.right - size - 4;
-
-      handle.host.style.top = `${Math.round(top)}px`;
-      handle.host.style.left = `${Math.round(left)}px`;
     }
 
     /**
@@ -257,28 +292,125 @@ export default defineContentScript({
       }
 
       document.removeEventListener("mousedown", activeDropdown.onOutsideClick, true);
-      document.removeEventListener("keydown", activeDropdown.onEscape, true);
+      document.removeEventListener("keydown", activeDropdown.onKeyNav, true);
       activeDropdown.host.remove();
       activeDropdown = null;
     }
 
+    function delay(ms: number): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     /**
-     * 执行用户名与密码填充，并上报使用记录。
+     * 获取当前页面所有可见的用户名候选框（仅在无密码框时使用）。
+     * 只匹配有明确登录语义的输入框，不匹配通用 text 输入框。
      */
+    function getVisibleUsernameOnlyFields(): HTMLInputElement[] {
+      const selector = [
+        'input[type="email"]',
+        'input[autocomplete="username"]',
+        'input[name*="user" i]',
+        'input[name*="email" i]',
+        'input[name*="login" i]',
+      ].join(",");
+
+      return Array.from(document.querySelectorAll<HTMLInputElement>(selector)).filter(
+        (field) => isVisibleInput(field) && !isInSearchContext(field),
+      );
+    }
+
+    function findSubmitButton(anchorField: HTMLInputElement): HTMLButtonElement | HTMLInputElement | null {
+      const form = anchorField.closest("form");
+      if (form) {
+        const submitInForm =
+          form.querySelector<HTMLButtonElement | HTMLInputElement>(
+            'button[type="submit"], input[type="submit"]',
+          ) ??
+          form.querySelector<HTMLButtonElement>("button:not([type='button']):not([type='reset'])");
+        if (submitInForm) {
+          return submitInForm;
+        }
+      }
+
+      const NEXT_LABELS = /next|continue|proceed|下一步|继续|sign\s*in|log\s*in|登录|登入/i;
+
+      let ancestor: HTMLElement | null = anchorField.parentElement;
+      while (ancestor) {
+        const buttons = Array.from(
+          ancestor.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+            'button, input[type="submit"]',
+          ),
+        );
+        const match = buttons.find((btn) => NEXT_LABELS.test(btn.textContent ?? btn.getAttribute("value") ?? ""));
+        if (match) {
+          return match;
+        }
+        ancestor = ancestor.parentElement;
+      }
+
+      return null;
+    }
+
+    function waitForPasswordField(timeoutMs: number): Promise<HTMLInputElement | null> {
+      return new Promise((resolve) => {
+        const existing = getVisiblePasswordFields();
+        if (existing.length > 0) {
+          resolve(existing[0]);
+          return;
+        }
+
+        const timer = window.setTimeout(() => {
+          observer.disconnect();
+          resolve(null);
+        }, timeoutMs);
+
+        const observer = new MutationObserver(() => {
+          const fields = getVisiblePasswordFields();
+          if (fields.length > 0) {
+            window.clearTimeout(timer);
+            observer.disconnect();
+            resolve(fields[0]);
+          }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["type", "style", "class"] });
+      });
+    }
+
     async function fillCredentials(
-      passwordField: HTMLInputElement,
+      anchorField: HTMLInputElement,
       choice: AccountChoice,
+      isTwoStep: boolean = false,
     ): Promise<void> {
-      const usernameField = findUsernameField(passwordField);
       const username = choice.account.username ?? "";
       const password = choice.account.password ?? "";
 
-      if (usernameField && username) {
-        setFieldValue(usernameField, username);
-      }
+      if (isTwoStep) {
+        if (username) {
+          setFieldValue(anchorField, username);
+          await delay(FILL_ANIMATION_DURATION + 100);
 
-      if (password) {
-        setFieldValue(passwordField, password);
+          const submitBtn = findSubmitButton(anchorField);
+          if (submitBtn) {
+            submitBtn.click();
+            const passwordField = await waitForPasswordField(5000);
+            if (passwordField && password) {
+              await delay(200);
+              setFieldValue(passwordField, password);
+            }
+          }
+        }
+      } else {
+        const usernameField = findUsernameField(anchorField);
+        if (usernameField && username) {
+          setFieldValue(usernameField, username);
+          if (password) {
+            await delay(FILL_ANIMATION_DURATION + 100);
+          }
+        }
+        if (password) {
+          setFieldValue(anchorField, password);
+        }
       }
 
       await sendRuntimeMessage<{ success: boolean }>({
@@ -289,262 +421,214 @@ export default defineContentScript({
       });
     }
 
-    /**
-     * 通过 Shadow DOM 渲染账号下拉列表。
-     */
-    function showAccountDropdown(passwordField: HTMLInputElement, choices: AccountChoice[]): void {
+    function showAccountDropdown(anchorField: HTMLInputElement, choices: AccountChoice[], isTwoStep: boolean = false): void {
       closeAccountDropdown();
 
-      const rect = passwordField.getBoundingClientRect();
       const host = document.createElement("div");
-      host.style.position = "absolute";
-      host.style.left = `${Math.round(window.scrollX + rect.left)}px`;
-      host.style.top = `${Math.round(window.scrollY + rect.bottom + 6)}px`;
-      host.style.zIndex = "2147483647";
+      host.style.cssText = [
+        "position: fixed",
+        "inset: 0",
+        "z-index: 2147483647",
+        "display: flex",
+        "align-items: center",
+        "justify-content: center",
+        "pointer-events: none",
+      ].join(";");
       document.body.append(host);
 
       const shadowRoot = host.attachShadow({ mode: "open" });
+
       const style = document.createElement("style");
       style.textContent = `
         .keeper-dropdown {
-          min-width: 220px;
-          max-width: 320px;
-          max-height: 200px;
-          overflow-y: auto;
-          background: #fff;
-          border: 1px solid #ddd;
+          pointer-events: auto;
+          min-width: 240px;
+          max-width: 360px;
+          width: max-content;
+          background: #ffffff;
+          border: 1px solid #dcdfe6;
           border-radius: 8px;
-          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-          padding: 4px 0;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        }
-        .keeper-item {
-          padding: 8px 12px;
-          cursor: pointer;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+          padding: 8px;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
           display: flex;
           flex-direction: column;
-          gap: 2px;
+          gap: 4px;
+        }
+        .keeper-item {
+          display: block;
+          width: 100%;
+          box-sizing: border-box;
+          padding: 8px 16px;
+          border: 1px solid #dcdfe6;
+          border-radius: 4px;
+          background: #ffffff;
+          color: #606266;
+          font-size: 13px;
+          line-height: 1.5;
+          text-align: center;
+          cursor: pointer;
+          transition: background 0.15s, border-color 0.15s, color 0.15s;
+          outline: none;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
         .keeper-item:hover {
-          background: #f0f7ff;
+          background: #ecf5ff;
+          border-color: #409eff;
+          color: #409eff;
         }
-        .keeper-bookmark {
-          color: #666;
-          font-size: 12px;
-          line-height: 1.2;
-        }
-        .keeper-username {
-          color: #111;
-          font-size: 13px;
-          line-height: 1.3;
-          word-break: break-all;
+        .keeper-item.is-selected {
+          background: #409eff;
+          border-color: #409eff;
+          color: #ffffff;
         }
       `;
 
       const container = document.createElement("div");
       container.className = "keeper-dropdown";
+      container.addEventListener("mousedown", (e) => e.stopPropagation());
+
+      const itemEls: HTMLButtonElement[] = [];
 
       for (const choice of choices) {
         const item = document.createElement("button");
         item.type = "button";
         item.className = "keeper-item";
+        item.textContent = choice.account.username;
+        item.dataset.index = String(itemEls.length);
 
-        const bookmark = document.createElement("span");
-        bookmark.className = "keeper-bookmark";
-        bookmark.textContent = choice.bookmarkName;
-
-        const username = document.createElement("span");
-        username.className = "keeper-username";
-        username.textContent = choice.account.username;
-
-        item.append(bookmark, username);
         item.addEventListener("click", async () => {
           closeAccountDropdown();
-          await fillCredentials(passwordField, choice);
+          await fillCredentials(anchorField, choice, isTwoStep);
         });
 
         container.append(item);
+        itemEls.push(item);
       }
+
+      let selectedIndex = 0;
+      function applyHighlight(index: number): void {
+        itemEls.forEach((el, i) => {
+          el.classList.toggle("is-selected", i === index);
+        });
+        itemEls[index]?.scrollIntoView({ block: "nearest" });
+      }
+      applyHighlight(selectedIndex);
 
       shadowRoot.append(style, container);
 
       const onOutsideClick = (event: MouseEvent) => {
-        const target = event.target;
-        if (!(target instanceof Node)) {
-          return;
-        }
-
         const composedPath = event.composedPath();
         if (composedPath.includes(host)) {
           return;
         }
-
         closeAccountDropdown();
       };
 
-      const onEscape = (event: KeyboardEvent) => {
-        if (event.key === "Escape") {
-          closeAccountDropdown();
+      const onKeyNav = (event: KeyboardEvent) => {
+        if (!activeDropdown) {
+          return;
+        }
+
+        switch (event.key) {
+          case "ArrowDown":
+            event.preventDefault();
+            selectedIndex = (selectedIndex + 1) % itemEls.length;
+            activeDropdown.selectedIndex = selectedIndex;
+            applyHighlight(selectedIndex);
+            break;
+
+          case "ArrowUp":
+            event.preventDefault();
+            selectedIndex = (selectedIndex - 1 + itemEls.length) % itemEls.length;
+            activeDropdown.selectedIndex = selectedIndex;
+            applyHighlight(selectedIndex);
+            break;
+
+          case "Enter": {
+            event.preventDefault();
+            const chosen = choices[selectedIndex];
+            if (chosen) {
+              closeAccountDropdown();
+              void fillCredentials(anchorField, chosen, isTwoStep);
+            }
+            break;
+          }
+
+          case "Escape":
+            event.preventDefault();
+            closeAccountDropdown();
+            break;
+
+          default:
+            break;
         }
       };
 
       document.addEventListener("mousedown", onOutsideClick, true);
-      document.addEventListener("keydown", onEscape, true);
-      activeDropdown = { host, onOutsideClick, onEscape };
+      document.addEventListener("keydown", onKeyNav, true);
+      activeDropdown = { host, onOutsideClick, onKeyNav, selectedIndex, items: itemEls };
     }
 
     /**
-     * 创建并注入密码框旁的 Keeper 快捷图标。
+     * 处理快捷键触发的账号填充。
      */
-    function createKeeperIcon(passwordField: HTMLInputElement): IconHandle {
-      const host = document.createElement("div");
-      host.style.position = "absolute";
-      host.style.width = "20px";
-      host.style.height = "20px";
-      host.style.zIndex = "2147483646";
-      host.style.pointerEvents = "auto";
-      document.body.append(host);
+    async function handleFillFromShortcut(): Promise<void> {
+      const passwordFields = getVisiblePasswordFields();
 
-      const shadowRoot = host.attachShadow({ mode: "open" });
-      const style = document.createElement("style");
-      style.textContent = `
-        .keeper-icon {
-          width: 20px;
-          height: 20px;
-          border: 0;
-          border-radius: 10px;
-          background: rgba(255, 255, 255, 0.95);
-          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-          cursor: pointer;
-          padding: 0;
-          line-height: 20px;
-          text-align: center;
-          font-size: 13px;
-          opacity: 0.7;
-          transition: opacity 120ms ease;
-        }
-        .keeper-icon:hover {
-          opacity: 1;
-        }
-      `;
+      let anchorField: HTMLInputElement | null = null;
+      let isTwoStep = false;
 
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "keeper-icon";
-      button.setAttribute("aria-label", "Keeper autofill");
-      button.textContent = "🔑";
-
-      shadowRoot.append(style, button);
-
-      const clickHandler = async (event: MouseEvent) => {
-        event.preventDefault();
-        event.stopPropagation();
-
-        const bookmarks = await getMatchingBookmarks();
-        if (bookmarks.length === 0) {
-          closeAccountDropdown();
+      if (passwordFields.length > 0) {
+        anchorField = passwordFields[0];
+      } else {
+        const usernameFields = getVisibleUsernameOnlyFields();
+        if (usernameFields.length === 0) {
           return;
         }
+        anchorField = usernameFields[0];
+        isTwoStep = true;
+      }
 
-        const choices: AccountChoice[] = [];
-        for (const bookmark of bookmarks) {
-          for (const account of bookmark.accounts) {
-            choices.push({
-              bookmarkId: bookmark.bookmarkId,
-              bookmarkName: bookmark.name,
-              account,
-            });
-          }
-        }
-
-        if (choices.length === 0) {
-          closeAccountDropdown();
-          return;
-        }
-
-        if (choices.length === 1) {
-          closeAccountDropdown();
-          await fillCredentials(passwordField, choices[0]);
-          return;
-        }
-
-        showAccountDropdown(passwordField, choices);
-      };
-
-      button.addEventListener("click", clickHandler);
-
-      const handle: IconHandle = {
-        host,
-        button,
-        passwordField,
-        clickHandler,
-      };
-
-      positionIcon(handle);
-      return handle;
-    }
-
-    /**
-     * 扫描页面并为可用密码框挂载图标。
-     */
-    async function scanAndInjectIcons(): Promise<void> {
-      const unlocked = await isUnlocked();
-      if (!unlocked) {
-        for (const [field, handle] of iconHandles) {
-          handle.button.removeEventListener("click", handle.clickHandler);
-          handle.host.remove();
-          iconHandles.delete(field);
-        }
-        closeAccountDropdown();
+      const bookmarks = await getMatchingBookmarks();
+      if (bookmarks.length === 0) {
         return;
       }
 
-      const passwordFields = getVisiblePasswordFields();
-      const currentSet = new Set(passwordFields);
-
-      for (const [field, handle] of iconHandles) {
-        if (!currentSet.has(field) || !field.isConnected) {
-          handle.button.removeEventListener("click", handle.clickHandler);
-          handle.host.remove();
-          iconHandles.delete(field);
+      const choices: AccountChoice[] = [];
+      for (const bookmark of bookmarks) {
+        for (const account of bookmark.accounts) {
+          choices.push({
+            bookmarkId: bookmark.bookmarkId,
+            bookmarkName: bookmark.name,
+            account,
+          });
         }
       }
 
-      for (const passwordField of passwordFields) {
-        const existing = iconHandles.get(passwordField);
-        if (existing) {
-          positionIcon(existing);
-          continue;
-        }
-
-        const handle = createKeeperIcon(passwordField);
-        iconHandles.set(passwordField, handle);
+      if (choices.length === 0) {
+        return;
       }
 
-      if (activeDropdown && !document.contains(activeDropdown.host)) {
-        closeAccountDropdown();
+      if (choices.length === 1) {
+        await fillCredentials(anchorField, choices[0], isTwoStep);
+        return;
       }
+
+      showAccountDropdown(anchorField, choices, isTwoStep);
     }
 
-    /**
-     * 防抖触发重扫，适配 SPA 动态渲染。
-     */
-    function scheduleScan(): void {
-      if (debounceTimer !== null) {
-        window.clearTimeout(debounceTimer);
-      }
-
-      debounceTimer = window.setTimeout(() => {
-        debounceTimer = null;
-        void scanAndInjectIcons();
-      }, 500);
-    }
-
-    /**
-     * 处理后台下发的生成密码填充消息。
-     */
     const onRuntimeMessage = (message: unknown) => {
       if (!message || typeof message !== "object") {
+        return;
+      }
+
+      const msg = message as Record<string, unknown>;
+
+      if (msg.type === "FILL_FROM_SHORTCUT") {
+        void handleFillFromShortcut();
         return;
       }
 
@@ -570,51 +654,9 @@ export default defineContentScript({
 
     browser.runtime.onMessage.addListener(onRuntimeMessage);
 
-    const onViewportChange = () => {
-      for (const handle of iconHandles.values()) {
-        positionIcon(handle);
-      }
-      if (activeDropdown) {
-        closeAccountDropdown();
-      }
-    };
-
-    window.addEventListener("scroll", onViewportChange, true);
-    window.addEventListener("resize", onViewportChange);
-
-    mutationObserver = new MutationObserver(() => {
-      scheduleScan();
-    });
-
-    if (document.body) {
-      mutationObserver.observe(document.body, {
-        childList: true,
-        subtree: true,
-      });
-    }
-
-    void scanAndInjectIcons();
-
     ctx.onInvalidated(() => {
-      if (debounceTimer !== null) {
-        window.clearTimeout(debounceTimer);
-        debounceTimer = null;
-      }
-
-      mutationObserver?.disconnect();
-      mutationObserver = null;
-
       closeAccountDropdown();
-
-      for (const handle of iconHandles.values()) {
-        handle.button.removeEventListener("click", handle.clickHandler);
-        handle.host.remove();
-      }
-      iconHandles.clear();
-
-      window.removeEventListener("scroll", onViewportChange, true);
-      window.removeEventListener("resize", onViewportChange);
-
+      fillAnimationStyle?.remove();
       browser.runtime.onMessage.removeListener(onRuntimeMessage);
     });
   },

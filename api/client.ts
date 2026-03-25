@@ -10,6 +10,7 @@ import type {
   InitializeResponse,
   UnlockRequest,
   UnlockResponse,
+  AuthInfoResponse,
   AuthStatus,
   Bookmark,
   BookmarkCreate,
@@ -29,15 +30,15 @@ import type {
   RelationUpdate,
   RelationListResponse,
   StatsResponse,
-  ExportResponse,
   ImportResponse,
+  ImportPreviewResponse,
   HealthResponse,
-  KdfParams,
   DatabaseListResponse,
   DatabaseOpenRequest,
   DatabaseOpenResponse,
   DatabaseCreateRequest,
   DatabaseCreateResponse,
+  DatabaseRemoveRequest,
 } from './types';
 
 const DEFAULT_BASE_URL = 'https://127.0.0.1:8443/api';
@@ -62,10 +63,10 @@ export class KeeperApiError extends Error {
 
   static fromResponse(error: ApiError): KeeperApiError {
     return new KeeperApiError(
-      error.detail,
-      error.type,
-      error.status,
-      error.detail,
+      error.detail || 'Unknown error',
+      error.type || 'unknown',
+      error.status || 500,
+      error.detail || '',
       error.errors
     );
   }
@@ -168,12 +169,19 @@ export class KeeperClient {
 
         // 检查响应状态
         if (!response.ok) {
-          const error: ApiError = await response.json().catch(() => ({
-            type: 'https://keeper.local/errors/unknown',
-            title: 'Unknown Error',
-            status: response.status,
-            detail: response.statusText,
-          }));
+          const body = await response.json().catch(() => null);
+          const error: ApiError = body && body.type
+            ? body
+            : {
+                type: 'https://keeper.local/errors/unknown',
+                title: 'Error',
+                status: response.status,
+                detail: body?.detail
+                  ? (Array.isArray(body.detail)
+                    ? body.detail.map((e: any) => e.msg || e.message).join('; ')
+                    : String(body.detail))
+                  : response.statusText,
+              };
           throw KeeperApiError.fromResponse(error);
         }
 
@@ -220,7 +228,7 @@ export class KeeperClient {
   private isRetryableError(error: unknown): boolean {
     if (error instanceof KeeperApiError) {
       // 网络错误、5xx 错误可重试
-      return error.status >= 500 || error.type.includes('network');
+      return error.status >= 500 || error.type?.includes('network') === true;
     }
     if (error instanceof TypeError) {
       // 网络错误（DNS 解析失败、连接失败等）
@@ -248,6 +256,10 @@ export class KeeperClient {
   /** 初始化（首次使用） */
   async initialize(data: InitializeRequest): Promise<InitializeResponse> {
     return this.request<InitializeResponse>('POST', '/auth/initialize', data);
+  }
+
+  async getAuthInfo(): Promise<AuthInfoResponse> {
+    return this.request<AuthInfoResponse>('GET', '/auth/info');
   }
 
   /** 解锁（登录） */
@@ -363,11 +375,29 @@ export class KeeperClient {
     return this.request<StatsResponse>('GET', '/stats');
   }
 
-  // ============ 导入导出 ============
+  // ============ 导出 ============
 
-  /** 导出数据 */
-  async exportData(format: 'json' | 'csv' = 'json'): Promise<ExportResponse | string> {
-    return this.request<ExportResponse | string>('GET', '/export', undefined, { format });
+  /** 导出 JSON（返回原始 Response 以便触发下载） */
+  async exportJson(): Promise<Response> {
+    const url = `${this.baseUrl}/transfer/export/json`;
+    const response = await this.fetchWithTimeout(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      credentials: 'include',
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      const error: ApiError = body && body.type
+        ? body
+        : {
+            type: 'https://keeper.local/errors/unknown',
+            title: 'Error',
+            status: response.status,
+            detail: response.statusText,
+          };
+      throw KeeperApiError.fromResponse(error);
+    }
+    return response;
   }
 
   // ============ 数据库管理 ============
@@ -387,25 +417,27 @@ export class KeeperClient {
     return this.request<DatabaseCreateResponse>('POST', '/db/create', data);
   }
 
-  // ============ 导入导出 ============
+  async removeDatabase(data: DatabaseRemoveRequest): Promise<void> {
+    return this.request<void>('POST', '/db/remove', data);
+  }
 
-  /** 导入数据 */
-  async importData(file: File, merge: boolean = false): Promise<ImportResponse> {
-    const formData = new FormData();
-    formData.append('file', file);
+  // ============ 导入 ============
 
-    const response = await fetch(`${this.baseUrl}/import?merge=${merge}`, {
-      method: 'POST',
-      body: formData,
-      credentials: 'include',
+  /** 导入数据（Keeper JSON 格式） */
+  async importKeeperJson(content: string, conflictPolicy: 'skip' | 'rename' | 'overwrite' = 'skip'): Promise<ImportResponse> {
+    return this.request<ImportResponse>('POST', '/transfer/import', {
+      format: 'keeper_json',
+      content,
+      conflictPolicy,
     });
+  }
 
-    if (!response.ok) {
-      const error: ApiError = await response.json();
-      throw KeeperApiError.fromResponse(error);
-    }
-
-    return response.json();
+  /** 预览导入内容 */
+  async previewImport(content: string, format: string): Promise<ImportPreviewResponse> {
+    return this.request<ImportPreviewResponse>('POST', '/transfer/import/preview', {
+      format,
+      content,
+    });
   }
 }
 

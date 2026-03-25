@@ -7,11 +7,9 @@
  * - 后续连接：验证指纹一致性
  * - 指纹不匹配：阻断请求，通知用户
  *
- * 指纹使用 User Key 加密后存储于 browser.storage.local
+ * 指纹以明文存储于 browser.storage.local（本地部署，HTTPS 保护下安全）
  */
 
-import { encrypt, decrypt } from '../crypto/encryption';
-import { keyManager } from '../crypto/keyManager';
 import type { Browser } from 'wxt/browser';
 
 const KEEPER_API_URL_PATTERN = 'https://127.0.0.1:8443/*';
@@ -21,8 +19,8 @@ const STORAGE_KEY_UPDATE_LOG = `${STORAGE_KEY_PREFIX}update_log`;
 const MAX_UPDATE_LOG_ENTRIES = 50;
 
 interface PinnedFingerprint {
-  /** 加密后的 SHA-256 指纹（User Key 加密，或 plaintext: 前缀的明文降级） */
-  encryptedFingerprint: string;
+  /** SHA-256 指纹（明文，冒号分隔的大写十六进制） */
+  fingerprint: string;
   pinnedAt: string;
   lastVerifiedAt: string;
 }
@@ -35,8 +33,8 @@ interface DecryptedFingerprint {
 }
 
 interface FingerprintUpdateLogEntry {
-  encryptedOldFingerprint: string;
-  encryptedNewFingerprint: string;
+  oldFingerprint: string;
+  newFingerprint: string;
   updatedAt: string;
   reason: 'user_confirmed' | 'initial_pin';
 }
@@ -209,10 +207,8 @@ export class CertPinManager {
   private async pinFingerprint(fingerprint: string): Promise<void> {
     const now = new Date().toISOString();
 
-    const encryptedFingerprint = await this.encryptFingerprint(fingerprint);
-
     const pinnedData: PinnedFingerprint = {
-      encryptedFingerprint,
+      fingerprint,
       pinnedAt: now,
       lastVerifiedAt: now,
     };
@@ -222,8 +218,8 @@ export class CertPinManager {
     });
 
     await this.appendUpdateLog({
-      encryptedOldFingerprint: '',
-      encryptedNewFingerprint: encryptedFingerprint,
+      oldFingerprint: '',
+      newFingerprint: fingerprint,
       updatedAt: now,
       reason: 'initial_pin',
     });
@@ -244,10 +240,8 @@ export class CertPinManager {
     const oldStored = await browser.storage.local.get(STORAGE_KEY_FINGERPRINT);
     const oldData = oldStored[STORAGE_KEY_FINGERPRINT] as PinnedFingerprint | undefined;
 
-    const encryptedFingerprint = await this.encryptFingerprint(newFingerprint);
-
     const pinnedData: PinnedFingerprint = {
-      encryptedFingerprint,
+      fingerprint: newFingerprint,
       pinnedAt: now,
       lastVerifiedAt: now,
     };
@@ -257,8 +251,8 @@ export class CertPinManager {
     });
 
     await this.appendUpdateLog({
-      encryptedOldFingerprint: oldData?.encryptedFingerprint ?? '',
-      encryptedNewFingerprint: encryptedFingerprint,
+      oldFingerprint: oldData?.fingerprint ?? '',
+      newFingerprint,
       updatedAt: now,
       reason: 'user_confirmed',
     });
@@ -298,10 +292,8 @@ export class CertPinManager {
       return null;
     }
 
-    const fingerprint = await this.decryptFingerprint(pinnedData.encryptedFingerprint);
-
     return {
-      fingerprint,
+      fingerprint: pinnedData.fingerprint,
       pinnedAt: pinnedData.pinnedAt,
       lastVerifiedAt: pinnedData.lastVerifiedAt,
     };
@@ -334,32 +326,6 @@ export class CertPinManager {
     await browser.storage.local.set({
       [STORAGE_KEY_UPDATE_LOG]: trimmed,
     });
-  }
-
-  /**
-   * KeyManager 未解锁时降级为 plaintext: 前缀存储（仅在用户未登录时发生）
-   */
-  private async encryptFingerprint(fingerprint: string): Promise<string> {
-    if (keyManager.isUnlocked()) {
-      const userKey = keyManager.getUserKey();
-      return encrypt(fingerprint, userKey);
-    }
-
-    console.warn('[CertPin] KeyManager 未解锁，指纹将以明文存储');
-    return `plaintext:${fingerprint}`;
-  }
-
-  private async decryptFingerprint(encryptedFingerprint: string): Promise<string> {
-    if (encryptedFingerprint.startsWith('plaintext:')) {
-      return encryptedFingerprint.slice('plaintext:'.length);
-    }
-
-    if (keyManager.isUnlocked()) {
-      const userKey = keyManager.getUserKey();
-      return decrypt(encryptedFingerprint, userKey);
-    }
-
-    throw new Error('KeyManager 未解锁，无法解密证书指纹');
   }
 }
 

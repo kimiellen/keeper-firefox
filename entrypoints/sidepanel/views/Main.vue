@@ -2,9 +2,12 @@
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useBookmarksStore } from '../../../stores/bookmarks';
 import { useTagsStore } from '../../../stores/tags';
+import { useRelationsStore } from '../../../stores/relations';
 import type { Bookmark, UrlItem, AccountItem } from '../../../api/types';
 import { ElMessage } from 'element-plus';
 import { Search, Plus, Setting, DocumentCopy } from '@element-plus/icons-vue';
+import type { ElInput } from 'element-plus';
+import { toSoftBackground } from '../../../utils/tagColors';
 
 const emit = defineEmits<{
   (e: 'edit', bookmark: Bookmark | null): void;
@@ -13,10 +16,13 @@ const emit = defineEmits<{
 
 const bookmarksStore = useBookmarksStore();
 const tagsStore = useTagsStore();
+const relationsStore = useRelationsStore();
 
 const searchQuery = ref('');
-const selectedIndex = ref(0);
-const searchInput = ref<HTMLInputElement | null>(null);
+const selectedTagIds = ref<number[]>([]);
+const selectedRelationIds = ref<number[]>([]);
+const selectedIndex = ref<number | null>(null);
+const searchInput = ref<InstanceType<typeof ElInput> | null>(null);
 const resultsArea = ref<HTMLElement | null>(null);
 
 // Url Selector Dialog
@@ -51,6 +57,21 @@ const filteredBookmarks = computed(() => {
       });
     });
   }
+
+  // 按标签过滤（AND：书签必须包含所有选中的标签）
+  if (selectedTagIds.value.length > 0) {
+    results = results.filter(bookmark =>
+      selectedTagIds.value.every(tagId => bookmark.tagIds?.includes(tagId))
+    );
+  }
+
+  // 按关联过滤（AND：书签的账号必须关联所有选中的关联项）
+  if (selectedRelationIds.value.length > 0) {
+    results = results.filter(bookmark => {
+      const allRelatedIds = bookmark.accounts?.flatMap(a => a.relatedIds || []) || [];
+      return selectedRelationIds.value.every(rid => allRelatedIds.includes(rid));
+    });
+  }
   
   // 按最近使用排序
   return results.sort((a, b) => {
@@ -65,6 +86,22 @@ function getTagName(tagId: number): string {
   return tag ? tag.name : String(tagId);
 }
 
+function getTagColor(tagId: number): string {
+  const tag = tagsStore.tags.find(t => t.id === tagId);
+  return tag?.color || '#9CA3AF';
+}
+
+function getBookmarkBorderColor(bookmark: Bookmark): string {
+  if (bookmark.tagIds && bookmark.tagIds.length > 0) {
+    return getTagColor(bookmark.tagIds[0]);
+  }
+  return '#9CA3AF';
+}
+
+function getBookmarkBgColor(bookmark: Bookmark): string {
+  return toSoftBackground(getBookmarkBorderColor(bookmark));
+}
+
 function formatDate(dateStr?: string) {
   if (!dateStr) return '-';
   const d = new Date(dateStr);
@@ -73,34 +110,36 @@ function formatDate(dateStr?: string) {
 
 // 搜索
 function handleSearch() {
-  selectedIndex.value = 0;
-  if (filteredBookmarks.value.length > 0) {
-    resultsArea.value?.focus();
-    scrollToSelected();
-  }
+  selectedIndex.value = null;
 }
 
 // 键盘导航
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    if (selectedIndex.value < filteredBookmarks.value.length - 1) {
+    const max = filteredBookmarks.value.length - 1;
+    if (selectedIndex.value === null) {
+      selectedIndex.value = 0;
+    } else if (selectedIndex.value < max) {
       selectedIndex.value++;
-      scrollToSelected();
     }
+    scrollToSelected();
   } else if (e.key === 'ArrowUp') {
     e.preventDefault();
-    if (selectedIndex.value > 0) {
+    if (selectedIndex.value === null) {
+      selectedIndex.value = 0;
+    } else if (selectedIndex.value > 0) {
       selectedIndex.value--;
-      scrollToSelected();
     }
+    scrollToSelected();
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (filteredBookmarks.value.length > 0) {
+    if (selectedIndex.value !== null && filteredBookmarks.value.length > 0) {
       openBookmark(filteredBookmarks.value[selectedIndex.value]);
     }
   } else if (e.key === 'Escape') {
     e.preventDefault();
+    selectedIndex.value = null;
     searchInput.value?.focus();
   }
 }
@@ -111,8 +150,11 @@ function handleSearchKeydown(e: KeyboardEvent) {
     handleSearch();
   } else if (e.key === 'ArrowDown') {
     e.preventDefault();
-    resultsArea.value?.focus();
-    handleKeydown(e);
+    if (filteredBookmarks.value.length > 0) {
+      selectedIndex.value = 0;
+      resultsArea.value?.focus();
+      scrollToSelected();
+    }
   } else if (e.key === 'Escape') {
     // No action inside search
   }
@@ -161,9 +203,10 @@ function handleAccountDialogKeydown(e: KeyboardEvent) {
 
 // 滚动到选中项
 function scrollToSelected() {
+  if (selectedIndex.value === null) return;
   nextTick(() => {
     const items = document.querySelectorAll('.bookmark-item');
-    const selected = items[selectedIndex.value] as HTMLElement;
+    const selected = items[selectedIndex.value!] as HTMLElement;
     if (selected) {
       selected.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
@@ -183,7 +226,7 @@ async function openBookmark(bookmark: Bookmark) {
     if (sortedUrls.length === 1) {
       // 只有一个网址，直接打开
       await bookmarksStore.markAsUsed(bookmark.id!);
-      window.open(sortedUrls[0].url, '_blank');
+      browser.tabs.create({ url: sortedUrls[0].url });
     } else {
       // 多个网址，弹出选择框
       showUrlSelector(bookmark, sortedUrls);
@@ -202,7 +245,7 @@ async function openUrl(urlItem: UrlItem) {
   if (currentUrlBookmark.value?.id) {
     await bookmarksStore.markAsUsed(currentUrlBookmark.value.id);
   }
-  window.open(urlItem.url, '_blank');
+  browser.tabs.create({ url: urlItem.url });
   urlDialogVisible.value = false;
 }
 
@@ -260,14 +303,21 @@ function addBookmark() {
   emit('edit', null);
 }
 
-// 初始化
 onMounted(async () => {
+  bookmarksStore.startListening();
   await Promise.all([
     bookmarksStore.fetchBookmarks(),
-    tagsStore.fetchTags()
+    tagsStore.fetchTags(),
+    relationsStore.fetchRelations()
   ]);
-  // 自动聚焦搜索框
   searchInput.value?.focus();
+  window.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('input, button, a, [role="button"], [tabindex], .el-input, .el-button, .el-select, .el-dialog')) {
+      return;
+    }
+    searchInput.value?.focus();
+  });
 });
 </script>
 
@@ -285,6 +335,47 @@ onMounted(async () => {
       />
     </div>
 
+    <!-- 过滤栏 -->
+    <div class="filter-bar">
+      <el-select
+        v-model="selectedTagIds"
+        multiple
+        collapse-tags
+        collapse-tags-tooltip
+        clearable
+        placeholder="标签"
+        class="filter-select"
+      >
+        <el-option
+          v-for="tag in tagsStore.tags"
+          :key="tag.id"
+          :label="tag.name"
+          :value="tag.id"
+        >
+          <span class="tag-option">
+            <span class="tag-color-dot" :style="{ backgroundColor: getTagColor(tag.id) }"></span>
+            {{ tag.name }}
+          </span>
+        </el-option>
+      </el-select>
+      <el-select
+        v-model="selectedRelationIds"
+        multiple
+        collapse-tags
+        collapse-tags-tooltip
+        clearable
+        placeholder="关联"
+        class="filter-select"
+      >
+        <el-option
+          v-for="relation in relationsStore.relations"
+          :key="relation.id"
+          :label="relation.name"
+          :value="relation.id"
+        />
+      </el-select>
+    </div>
+
     <!-- 书签列表 -->
     <div 
       class="bookmark-list-container" 
@@ -298,24 +389,17 @@ onMounted(async () => {
             v-for="(bookmark, index) in filteredBookmarks"
             :key="bookmark.id"
             :class="['bookmark-item', { selected: index === selectedIndex }]"
+            :style="{
+              borderLeftColor: getBookmarkBorderColor(bookmark),
+              backgroundColor: getBookmarkBgColor(bookmark),
+              '--item-color': getBookmarkBorderColor(bookmark),
+            }"
             @click="openBookmark(bookmark)"
           >
             <div class="bookmark-info">
               <div class="bookmark-name">{{ bookmark.name }}</div>
               <div class="bookmark-url">
                 {{ bookmark.urls?.[0]?.url || '无网址' }}
-              </div>
-              <div class="bookmark-meta">
-                <span v-if="bookmark.tagIds && bookmark.tagIds.length > 0" class="tags">
-                  <span v-for="tagId in bookmark.tagIds" :key="tagId" class="tag">
-                    {{ getTagName(tagId) }}
-                  </span>
-                </span>
-                <span class="dates">
-                  创建: {{ formatDate(bookmark.createdAt) }} | 
-                  修改: {{ formatDate(bookmark.updatedAt) }} | 
-                  使用: {{ formatDate(bookmark.lastUsedAt) }}
-                </span>
               </div>
             </div>
             <div class="bookmark-actions">
@@ -373,7 +457,6 @@ onMounted(async () => {
           @click="openUrl(url)"
         >
           <div class="url-text">{{ url.url }}</div>
-          <div class="url-meta">最后使用: {{ formatDate(url.lastUsed) }}</div>
         </div>
       </div>
     </el-dialog>
@@ -421,6 +504,18 @@ onMounted(async () => {
   border-bottom: 1px solid var(--color-border, #eeeeee);
 }
 
+.filter-bar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--color-border, #eeeeee);
+}
+
+.filter-select {
+  flex: 1;
+  min-width: 0;
+}
+
 .bookmark-list-container {
   flex: 1;
   overflow: hidden;
@@ -429,15 +524,18 @@ onMounted(async () => {
 
 .bookmark-list {
   padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .bookmark-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  padding: 10px 16px;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background 0.15s, outline 0.15s;
   border-left: 3px solid transparent;
 }
 
@@ -446,8 +544,9 @@ onMounted(async () => {
 }
 
 .bookmark-item.selected {
-  background: var(--color-accent-soft, #fff0f0);
-  border-left: 3px solid var(--color-accent, #e74c3c);
+  outline: 2px solid var(--item-color, #9CA3AF);
+  outline-offset: -2px;
+  background-color: color-mix(in srgb, var(--item-color, #9CA3AF) 15%, transparent) !important;
 }
 
 .bookmark-info {
@@ -471,33 +570,6 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   margin-top: 2px;
-}
-
-.bookmark-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--color-text-placeholder, #bbbbbb);
-}
-
-.tags {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.tag {
-  padding: 2px 6px;
-  background: var(--color-accent, #e74c3c);
-  color: #fff;
-  border-radius: 4px;
-}
-
-.dates {
-  display: flex;
-  gap: 8px;
 }
 
 .bookmark-actions {
@@ -578,11 +650,21 @@ onMounted(async () => {
   margin-top: 4px;
 }
 
-/* 暗色模式支持 - 基础主题已通过 CSS vars 处理，这里补充一些全局覆盖 */
-:global(.dark) .bookmark-item.selected {
-  background: var(--color-accent-soft, #3d2020);
-}
+/* 暗色模式支持 */
 :global(.dark) .dialog-list-item.selected {
   background: var(--color-accent-soft, #3d2020);
+}
+
+.tag-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 </style>

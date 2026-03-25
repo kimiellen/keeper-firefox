@@ -2,8 +2,7 @@
 import { ref, onMounted, nextTick } from 'vue';
 import { useAuthStore } from '../../../stores/auth';
 import { useDatabaseStore } from '../../../stores/database';
-import { KeyManager } from '../../../utils/crypto';
-import { Check, Folder, Plus } from '@element-plus/icons-vue';
+import { Check, Close, Folder, Plus } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 
 const emit = defineEmits<{
@@ -32,16 +31,21 @@ const createForm = ref({
 const isCreating = ref(false);
 const createError = ref('');
 
-// 加载保存的 tab 状态
 onMounted(async () => {
   await databaseStore.fetchList();
   const savedTab = localStorage.getItem('unlockTab');
   if (savedTab === 'password' || savedTab === 'fingerprint') {
     activeTab.value = savedTab;
   }
-  // 自动聚焦密码输入框
-  nextTick(() => {
-    passwordInput.value?.focus();
+  nextTick(() => passwordInput.value?.focus());
+  window.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('input, button, a, [role="button"], [tabindex], .el-input, .el-button, .el-select, .el-dialog, .db-selector-container')) {
+      return;
+    }
+    if (activeTab.value === 'password') {
+      passwordInput.value?.focus();
+    }
   });
 });
 
@@ -74,8 +78,16 @@ async function handleUnlock() {
     } else {
       error.value = '密码错误';
     }
-  } catch (e) {
-    error.value = '解锁失败';
+  } catch (e: any) {
+    if (authStore.error) {
+      error.value = authStore.error;
+    } else if (e?.detail) {
+      error.value = e.detail;
+    } else if (e?.message) {
+      error.value = e.message;
+    } else {
+      error.value = '解锁失败';
+    }
   } finally {
     isLoading.value = false;
   }
@@ -133,6 +145,16 @@ function handleCreateDbClick() {
   dbPathInput.value = '';
 }
 
+async function handleRemoveDatabase(path: string, event: Event) {
+  event.stopPropagation();
+  const success = await databaseStore.removeDatabase(path);
+  if (success) {
+    ElMessage.success('已移除数据库关联');
+  } else {
+    ElMessage.error(databaseStore.error || '移除失败');
+  }
+}
+
 function submitCreateDb() {
   if (!dbPathInput.value) return;
   showCreateDialog.value = true;
@@ -162,24 +184,10 @@ async function doCreateDatabase() {
   createError.value = '';
 
   try {
-    const email = createForm.value.email;
-    const password = createForm.value.password;
-    const path = dbPathInput.value;
-
-    const { encryptedUserKey, kdfParams } = await KeyManager.createEncryptedUserKey(password, email);
-    
     const success = await databaseStore.createDatabase(
-      path,
-      email,
-      password,
-      encryptedUserKey,
-      {
-        algorithm: kdfParams.algorithm,
-        memory: kdfParams.memory,
-        iterations: kdfParams.iterations,
-        parallelism: kdfParams.parallelism,
-        salt: kdfParams.salt
-      }
+      dbPathInput.value,
+      createForm.value.email,
+      createForm.value.password,
     );
 
     if (success) {
@@ -208,7 +216,6 @@ function handleFingerprint() {
   <div class="unlock-page">
     <div class="unlock-header">
       <h1>Keeper</h1>
-      <p class="subtitle">密码管理器</p>
     </div>
 
     <!-- Tabs - Element Plus -->
@@ -290,6 +297,13 @@ function handleFingerprint() {
             <el-icon v-if="db.path === databaseStore.currentPath" class="check-icon"><Check /></el-icon>
             <span v-else class="check-placeholder"></span>
             <span class="db-filename" :title="db.path">{{ db.name }}</span>
+            <el-icon 
+              v-if="db.path !== databaseStore.currentPath"
+              class="remove-icon"
+              @click="handleRemoveDatabase(db.path, $event)"
+            >
+              <Close />
+            </el-icon>
           </div>
         </div>
 
@@ -308,8 +322,11 @@ function handleFingerprint() {
             @keyup.enter="submitOpenDb"
             autofocus
           >
-            <template #append>
-              <el-button @click="submitOpenDb">打开</el-button>
+            <template #suffix>
+              <div class="input-action-buttons">
+                <el-icon class="action-icon confirm-icon" @click="submitOpenDb" title="打开"><Check /></el-icon>
+                <el-icon class="action-icon cancel-icon" @click="showOpenDbInput = false; dbPathInput = ''" title="取消"><Close /></el-icon>
+              </div>
             </template>
           </el-input>
         </div>
@@ -329,8 +346,11 @@ function handleFingerprint() {
             @keyup.enter="submitCreateDb"
             autofocus
           >
-            <template #append>
-              <el-button @click="submitCreateDb">新建</el-button>
+            <template #suffix>
+              <div class="input-action-buttons">
+                <el-icon class="action-icon confirm-icon" @click="submitCreateDb" title="新建"><Check /></el-icon>
+                <el-icon class="action-icon cancel-icon" @click="showCreateDbInput = false; dbPathInput = ''" title="取消"><Close /></el-icon>
+              </div>
             </template>
           </el-input>
         </div>
@@ -405,19 +425,18 @@ function handleFingerprint() {
   margin: 0;
 }
 
-.subtitle {
-  font-size: 14px;
-  color: var(--color-text-secondary);
-  margin: 4px 0 0;
-}
-
 /* Element Plus Tabs 样式覆盖 */
 .unlock-tabs {
   width: 100%;
 }
 
 .unlock-tabs :deep(.el-tabs__nav-wrap::after) {
-  background-color: var(--color-border);
+  display: none;
+}
+
+.unlock-tabs :deep(.el-tabs__nav) {
+  width: 100%;
+  justify-content: center;
 }
 
 .unlock-tabs :deep(.el-tabs__active-bar) {
@@ -586,6 +605,22 @@ function handleFingerprint() {
   white-space: nowrap;
 }
 
+.remove-icon {
+  font-size: 14px;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.db-item:hover .remove-icon {
+  opacity: 1;
+}
+
+.remove-icon:hover {
+  color: var(--color-accent);
+}
+
 .dropdown-divider {
   height: 1px;
   background-color: var(--color-border);
@@ -609,6 +644,38 @@ function handleFingerprint() {
 
 .db-action-input {
   padding: 8px 12px;
+}
+
+.input-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.action-icon {
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.confirm-icon {
+  color: var(--color-text-secondary);
+}
+
+.confirm-icon:hover {
+  color: var(--el-color-success, #67c23a);
+  background-color: var(--color-bg-hover);
+}
+
+.cancel-icon {
+  color: var(--color-text-secondary);
+}
+
+.cancel-icon:hover {
+  color: var(--color-accent);
+  background-color: var(--color-bg-hover);
 }
 
 /* 创建对话框 */

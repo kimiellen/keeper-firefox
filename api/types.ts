@@ -30,23 +30,11 @@ export interface PaginatedResponse<T> {
   offset?: number;
 }
 
-// ============ KDF 参数 ============
-
-export interface KdfParams {
-  algorithm: string;
-  memory: number;
-  iterations: number;
-  parallelism: number;
-  salt: string;
-}
-
 // ============ 认证 ============
 
 export interface InitializeRequest {
   email: string;
-  masterPasswordHash: string;
-  encryptedUserKey: string;
-  kdfParams: KdfParams;
+  password: string;
 }
 
 export interface InitializeResponse {
@@ -55,13 +43,15 @@ export interface InitializeResponse {
 }
 
 export interface UnlockRequest {
-  masterPasswordHash: string;
+  password: string;
+}
+
+export interface AuthInfoResponse {
+  email: string;
 }
 
 export interface UnlockResponse {
   message: string;
-  encryptedUserKey: string;
-  kdfParams: KdfParams;
 }
 
 export interface StatusResponseUnlocked {
@@ -157,8 +147,8 @@ export interface BookmarkUseResponse {
 export interface Tag {
   id: number;
   name: string;
-  color?: string;
-  icon?: string;
+  color: string;
+  icon: string;
   bookmarkCount?: number;
   createdAt: string;
   updatedAt: string;
@@ -236,22 +226,41 @@ export interface ExportResponse {
 }
 
 export interface ImportRequest {
-  merge?: boolean;
+  format: 'keeper_json' | 'bitwarden_json' | 'csv';
+  content: string;
+  conflictPolicy: 'skip' | 'rename' | 'overwrite';
+}
+
+export interface ImportCounts {
+  bookmarks: number;
+  tags: number;
+  relations: number;
+}
+
+export interface ImportSkipped {
+  bookmarks: number;
+  reason: string;
 }
 
 export interface ImportResponse {
   message: string;
-  imported: {
-    bookmarks: number;
-    tags: number;
-    relations: number;
-  };
-  skipped: {
-    bookmarks: number;
-    tags: number;
-    relations: number;
-  };
-  errors: string[];
+  imported: ImportCounts;
+  skipped: ImportSkipped;
+  warnings: string[];
+}
+
+export interface ImportConflict {
+  name: string;
+  type: string;
+}
+
+export interface ImportPreviewResponse {
+  format: string;
+  totalBookmarks: number;
+  totalTags: number;
+  totalRelations: number;
+  conflicts: ImportConflict[];
+  warnings: string[];
 }
 
 // ============ 健康检查 ============
@@ -287,12 +296,14 @@ export interface DatabaseOpenResponse {
 export interface DatabaseCreateRequest {
   path: string;
   email: string;
-  masterPasswordHash: string;
-  encryptedUserKey: string;
-  kdfParams: KdfParams;
+  password: string;
 }
 
 export interface DatabaseCreateResponse {
   message: string;
   name: string;
+}
+
+export interface DatabaseRemoveRequest {
+  path: string;
 }

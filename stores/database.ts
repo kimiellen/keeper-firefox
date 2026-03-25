@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { keeperClient, KeeperApiError } from '../api';
-import type { DatabaseInfo, KdfParams } from '../api/types';
+import type { DatabaseInfo } from '../api/types';
 
 export const useDatabaseStore = defineStore('database', () => {
   // State
@@ -47,18 +47,12 @@ export const useDatabaseStore = defineStore('database', () => {
     }
   }
 
-  async function createDatabase(path: string, email: string, masterPasswordHash: string, encryptedUserKey: string, kdfParams: KdfParams) {
+  async function createDatabase(path: string, email: string, password: string) {
     loading.value = true;
     error.value = null;
     try {
-      await keeperClient.createDatabase({
-        path,
-        email,
-        masterPasswordHash,
-        encryptedUserKey,
-        kdfParams
-      });
-      await fetchList(); // Refresh the list
+      await keeperClient.createDatabase({ path, email, password });
+      await fetchList();
       return true;
     } catch (e: any) {
       error.value = e instanceof KeeperApiError ? e.detail : e.message;
@@ -68,9 +62,21 @@ export const useDatabaseStore = defineStore('database', () => {
     }
   }
 
+  async function removeDatabase(path: string) {
+    error.value = null;
+    try {
+      await keeperClient.removeDatabase({ path });
+      await fetchList();
+      return true;
+    } catch (e: any) {
+      error.value = e instanceof KeeperApiError ? e.detail : e.message;
+      return false;
+    }
+  }
+
   function clearError() {
     error.value = null;
   }
 
-  return { databases, currentPath, loading, error, currentDatabase, currentName, fetchList, openDatabase, createDatabase, clearError };
+  return { databases, currentPath, loading, error, currentDatabase, currentName, fetchList, openDatabase, createDatabase, removeDatabase, clearError };
 });

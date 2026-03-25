@@ -6,7 +6,6 @@
 
 import { CertPinManager } from '../security/certPinning';
 import type { CertVerifyResult, CertPinEventListener } from '../security/certPinning';
-import { keyManager } from '../crypto/keyManager';
 
 function assert(condition: boolean, message: string) {
   if (!condition) {
@@ -125,7 +124,7 @@ async function runTests() {
     assert(log.length === 2, 'update log has 2 entries');
     assert(log[0].reason === 'user_confirmed', 'first log entry is user_confirmed');
     assert(log[1].reason === 'user_confirmed', 'second log entry is user_confirmed');
-    assert(log[1].encryptedNewFingerprint !== '', 'log entry has encrypted new fingerprint');
+    assert(log[1].newFingerprint !== '', 'log entry has new fingerprint');
   }
 
   // Test 7: clearPinnedData — 清除后恢复 first_use 状态
@@ -189,32 +188,22 @@ async function runTests() {
     assert(typeof listener.onError === 'function', 'event listener has onError');
   }
 
-  // Test 10: plaintext fallback — KeyManager 未解锁时明文存储
+  // Test 10: 明文存储 — 指纹以明文直接存储于 browser.storage.local
   {
     await clearStorage();
     const manager = createFreshManager();
 
-    // keyManager.isUnlocked() 返回 false 时应使用 plaintext: 前缀
-    // 此测试依赖 keyManager 的实际状态
-    if (!keyManager.isUnlocked()) {
-      await manager.trustNewFingerprint(SAMPLE_FINGERPRINT_A);
+    await manager.trustNewFingerprint(SAMPLE_FINGERPRINT_A);
 
-      const stored = await browser.storage.local.get('cert_pin_fingerprint');
-      const pinnedData = stored['cert_pin_fingerprint'] as { encryptedFingerprint: string } | undefined;
+    const stored = await browser.storage.local.get('cert_pin_fingerprint');
+    const pinnedData = stored['cert_pin_fingerprint'] as { fingerprint: string } | undefined;
 
-      assert(pinnedData !== undefined, 'pinned data stored');
-      assert(
-        pinnedData!.encryptedFingerprint.startsWith('plaintext:'),
-        'fingerprint stored with plaintext: prefix when KeyManager locked',
-      );
+    assert(pinnedData !== undefined, 'pinned data stored');
+    assert(pinnedData!.fingerprint === SAMPLE_FINGERPRINT_A, 'fingerprint stored as plaintext');
 
-      // 验证明文可以正常解密回来
-      const info = await manager.getPinnedInfo();
-      assert(info !== null, 'getPinnedInfo works with plaintext storage');
-      assert(info!.fingerprint === SAMPLE_FINGERPRINT_A, 'plaintext stored fingerprint decrypts correctly');
-    } else {
-      console.log('⊘ Skipping plaintext test (KeyManager is unlocked)');
-    }
+    const info = await manager.getPinnedInfo();
+    assert(info !== null, 'getPinnedInfo works with plaintext storage');
+    assert(info!.fingerprint === SAMPLE_FINGERPRINT_A, 'plaintext stored fingerprint reads correctly');
   }
 
   console.log('\n✅ All certificate pinning tests passed!');
