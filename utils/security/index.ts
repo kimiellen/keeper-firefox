@@ -1,2 +1,2 @@
-export { CertPinManager, certPinManager } from './certPinning';
-export type { CertVerifyResult, CertPinEventListener } from './certPinning';
+// 安全工具导出
+// 证书固定功能已移除（后端改为 HTTP 模式）

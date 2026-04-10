@@ -7,7 +7,7 @@ export default defineConfig({
   }),
   manifest: {
     name: 'Keeper',
-    version: '1.0.0',
+    version: '0.26.04',
     description: '密码管理器',
     browser_specific_settings: {
       gecko: {
@@ -24,8 +24,7 @@ export default defineConfig({
       'activeTab',
       'contextMenus',
       'tabs',
-      'webRequest',
-      'webRequestBlocking',
+      'notifications',
       '<all_urls>'
     ],
     icons: {

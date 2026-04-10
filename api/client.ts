@@ -30,6 +30,7 @@ import type {
   RelationUpdate,
   RelationListResponse,
   StatsResponse,
+  ExportResponse,
   ImportResponse,
   ImportPreviewResponse,
   HealthResponse,
@@ -39,9 +40,11 @@ import type {
   DatabaseCreateRequest,
   DatabaseCreateResponse,
   DatabaseRemoveRequest,
+  DatabaseAddRequest,
+  DatabaseAddResponse,
 } from './types';
 
-const DEFAULT_BASE_URL = 'https://127.0.0.1:8443/api';
+const DEFAULT_BASE_URL = 'http://127.0.0.1:51000/api';
 const DEFAULT_TIMEOUT = 30000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
@@ -92,7 +95,6 @@ export interface KeeperClientOptions {
   timeout?: number;
   retries?: number;
   retryDelay?: number;
-  onUnauthorized?: () => void;
 }
 
 /**
@@ -103,14 +105,43 @@ export class KeeperClient {
   private timeout: number;
   private retries: number;
   private retryDelay: number;
-  private onUnauthorized?: () => void;
+
+  private token: string | null = null;
 
   constructor(options: KeeperClientOptions = {}) {
     this.baseUrl = options.baseUrl || DEFAULT_BASE_URL;
     this.timeout = options.timeout || DEFAULT_TIMEOUT;
     this.retries = options.retries || MAX_RETRIES;
     this.retryDelay = options.retryDelay || RETRY_DELAY;
-    this.onUnauthorized = options.onUnauthorized;
+
+  }
+
+  /**
+   * 设置会话令牌
+   */
+  async setToken(token: string | null): Promise<void> {
+    this.token = token;
+    // 使用 browser.storage.local 以便在后台脚本和侧边栏之间共享
+    if (token) {
+      await browser.storage.local.set({ keeper_session_token: token });
+    } else {
+      await browser.storage.local.remove('keeper_session_token');
+    }
+  }
+
+  /**
+   * 从 browser.storage.local 加载令牌
+   */
+  async loadToken(): Promise<void> {
+    const result = await browser.storage.local.get('keeper_session_token');
+    this.token = result.keeper_session_token || null;
+  }
+
+  /**
+   * 获取当前令牌
+   */
+  getToken(): string | null {
+    return this.token;
   }
 
   /**
@@ -138,13 +169,23 @@ export class KeeperClient {
     }
 
     // 构建请求选项
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    
+    // 添加 Authorization header（优先使用当前 token，兼容旧版 cookie）
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+      console.log('[Keeper:API] Adding Authorization header:', `Bearer ${this.token.substring(0, 10)}...`);
+    } else {
+      console.log('[Keeper:API] No token available for request:', path);
+    }
+
     const options: RequestInit = {
       method,
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      credentials: 'include', // 发送 Cookie
+      headers,
+      // 使用 Authorization header，不使用 cookie
     };
 
     if (body) {
@@ -156,11 +197,6 @@ export class KeeperClient {
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       try {
         const response = await this.fetchWithTimeout(url, options);
-
-        // 处理 401 未授权
-        if (response.status === 401 && this.onUnauthorized) {
-          this.onUnauthorized();
-        }
 
         // 204 No Content
         if (response.status === 204) {
@@ -277,6 +313,11 @@ export class KeeperClient {
     return this.request<AuthStatus>('GET', '/auth/status');
   }
 
+  /** 设置会话超时时间（分钟） */
+  async setSessionTimeout(minutes: number): Promise<{ message: string }> {
+    return this.request<{ message: string }>('POST', '/auth/session-timeout', { timeout: minutes });
+  }
+
   // ============ 书签 ============
 
   /** 获取书签列表 */
@@ -285,8 +326,9 @@ export class KeeperClient {
   }
 
   /** 获取单个书签 */
-  async getBookmark(id: string): Promise<Bookmark> {
-    return this.request<Bookmark>('GET', `/bookmarks/${id}`);
+  async getBookmark(id: string, decrypt: boolean = true): Promise<Bookmark> {
+    console.log(`[Keeper:API] getBookmark called for ${id.substring(0, 8)}..., decrypt=${decrypt}`);
+    return this.request<Bookmark>('GET', `/bookmarks/${id}`, undefined, { decrypt });
   }
 
   /** 创建书签 */
@@ -377,27 +419,9 @@ export class KeeperClient {
 
   // ============ 导出 ============
 
-  /** 导出 JSON（返回原始 Response 以便触发下载） */
-  async exportJson(): Promise<Response> {
-    const url = `${this.baseUrl}/transfer/export/json`;
-    const response = await this.fetchWithTimeout(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      credentials: 'include',
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => null);
-      const error: ApiError = body && body.type
-        ? body
-        : {
-            type: 'https://keeper.local/errors/unknown',
-            title: 'Error',
-            status: response.status,
-            detail: response.statusText,
-          };
-      throw KeeperApiError.fromResponse(error);
-    }
-    return response;
+  /** 导出 JSON（需要密码认证） */
+  async exportJson(password: string): Promise<ExportResponse> {
+    return this.request<ExportResponse>('POST', '/export', { password });
   }
 
   // ============ 数据库管理 ============
@@ -421,14 +445,20 @@ export class KeeperClient {
     return this.request<void>('POST', '/db/remove', data);
   }
 
+  async addDatabase(data: DatabaseAddRequest): Promise<DatabaseAddResponse> {
+    return this.request<DatabaseAddResponse>('POST', '/db/add', data);
+  }
+
   // ============ 导入 ============
 
-  /** 导入数据（Keeper JSON 格式） */
-  async importKeeperJson(content: string, conflictPolicy: 'skip' | 'rename' | 'overwrite' = 'skip'): Promise<ImportResponse> {
-    return this.request<ImportResponse>('POST', '/transfer/import', {
-      format: 'keeper_json',
-      content,
-      conflictPolicy,
+  /** 导入数据（Keeper JSON 格式，需要密码认证） */
+  async importKeeperJson(password: string, content: string, conflictPolicy: 'skip' | 'rename' | 'overwrite' = 'skip'): Promise<ImportResponse> {
+    // 将 JSON 字符串解析为对象
+    const data = JSON.parse(content);
+    return this.request<ImportResponse>('POST', '/import', {
+      password,
+      data,
+      conflict_policy: conflictPolicy,
     });
   }
 

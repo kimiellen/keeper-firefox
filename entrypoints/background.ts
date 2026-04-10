@@ -1,7 +1,5 @@
 import { keeperClient } from '../api/client';
 import type { Bookmark, BookmarkCreate } from '../api/types';
-import { certPinManager } from '../utils/security/certPinning';
-import type { CertVerifyResult } from '../utils/security/certPinning';
 
 interface MatchingBookmark {
   bookmarkId: string;
@@ -16,6 +14,7 @@ interface MatchingBookmark {
 type KeeperMessage =
   | { type: 'GET_AUTH_STATUS' }
   | { type: 'GET_MATCHING_BOOKMARKS'; payload: { url: string } }
+  | { type: 'GET_DECRYPTED_PASSWORD'; payload: { bookmarkId: string; accountId: number } }
   | { type: 'SAVE_CREDENTIALS'; payload: { url: string; username: string; password: string } }
   | {
       type: 'GENERATE_PASSWORD';
@@ -28,10 +27,11 @@ type KeeperMessage =
       };
     }
   | { type: 'MARK_AS_USED'; payload: { bookmarkId: string; url?: string; accountId?: number } }
-  | { type: 'TRUST_NEW_CERT'; payload: { fingerprint: string } }
-  | { type: 'GET_CERT_PIN_STATUS' }
-  | { type: 'CLEAR_CERT_PIN' }
-  | { type: 'LOCK_AND_HIDE' };
+  | { type: 'LOCK_AND_HIDE' }
+  | { type: 'FOCUS_INPUT' }
+  | { type: 'SAVE_PENDING_CREDENTIAL'; payload: { url: string; hostname: string; username: string; password: string } }
+  | { type: 'GET_PENDING_CREDENTIAL' }
+  | { type: 'CLEAR_PENDING_CREDENTIAL' };
 
 interface PasswordOptions {
   length: number;
@@ -43,10 +43,75 @@ interface PasswordOptions {
 
 const CONTEXT_MENU_ID = 'keeper-generate-password';
 let sidebarOpen = false;
+const SETTINGS_STORAGE_KEY = 'keeper_settings';
 const LOWERCASE = 'abcdefghijklmnopqrstuvwxyz';
 const UPPERCASE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const NUMBERS = '0123456789';
+
 const SPECIAL = '!@#$%^&*()-_=+[]{};:,.<>?/|';
+
+// ============ 待保存凭据状态管理 ============
+
+/** 待处理的凭据 */
+interface PendingCredential {
+  url: string;
+  hostname: string;
+  username: string;
+  password: string;
+  capturedAt: number;
+  sourceTabId: number;
+}
+
+const PENDING_TIMEOUT = 5 * 60 * 1000; // 5分钟超时
+
+// 内存中存储待处理凭据 (background script 是持久化的)
+let pendingCredential: PendingCredential | null = null;
+
+/**
+ * 保存待处理凭据到内存
+ */
+function savePendingCredential(
+  credential: Omit<PendingCredential, 'capturedAt'>,
+  sendResponse: (response: { success?: boolean }) => void,
+): void {
+  try {
+    pendingCredential = {
+      ...credential,
+      capturedAt: Date.now(),
+    };
+    console.log('[Keeper:bg] Pending credential saved for', credential.hostname);
+    sendResponse({ success: true });
+  } catch (error) {
+    console.error('[Keeper:bg] Failed to save pending credential:', error);
+    sendResponse({ success: false });
+  }
+}
+
+/**
+ * 获取待处理凭据
+ */
+function getPendingCredential(
+  sendResponse: (response: { credential?: PendingCredential | null }) => void,
+): void {
+  // 检查是否过期
+  if (pendingCredential && Date.now() - pendingCredential.capturedAt > PENDING_TIMEOUT) {
+    pendingCredential = null;
+    sendResponse({ credential: null });
+    return;
+  }
+
+  sendResponse({ credential: pendingCredential });
+}
+
+/**
+ * 清除待处理凭据
+ */
+function clearPendingCredential(
+  sendResponse: (response: { success?: boolean }) => void,
+): void {
+  pendingCredential = null;
+  sendResponse({ success: true });
+}
 
 /**
  * 解析 URL 并提取主机名。
@@ -146,12 +211,20 @@ function getErrorMessage(error: unknown): string {
 /**
  * 返回当前登录锁定状态。
  */
-async function handleGetAuthStatus(sendResponse: (response: { locked?: boolean; error?: string }) => void): Promise<void> {
+async function handleGetAuthStatus(): Promise<{ locked?: boolean; error?: string }> {
+  console.log('[Keeper:bg] handleGetAuthStatus called');
+  // 重新加载 token，确保获取最新值（侧边栏可能在后台启动后解锁）
+  await keeperClient.loadToken();
+  const token = keeperClient.getToken();
+  console.log('[Keeper:bg] token loaded:', token ? 'exists (' + token.substring(0, 10) + '...)' : 'null');
+  
   try {
     const status = await keeperClient.getStatus();
-    sendResponse({ locked: status.locked });
+    console.log('[Keeper:bg] getStatus returned:', status);
+    return { locked: status.locked };
   } catch (error) {
-    sendResponse({ error: getErrorMessage(error) });
+    console.error('[Keeper:bg] getStatus error:', error);
+    return { error: getErrorMessage(error) };
   }
 }
 
@@ -160,27 +233,85 @@ async function handleGetAuthStatus(sendResponse: (response: { locked?: boolean; 
  */
 async function handleGetMatchingBookmarks(
   payload: { url: string },
-  sendResponse: (response: { bookmarks?: MatchingBookmark[]; error?: string }) => void,
-): Promise<void> {
-  try {
-    const bookmarksResult = await keeperClient.getBookmarks({ limit: 100 });
-    const matched = bookmarksResult.data.filter((bookmark) =>
-      isBookmarkMatchingHostname(bookmark, payload.url),
-    );
+  sender?: browser.runtime.MessageSender,
+): Promise<{ bookmarks?: MatchingBookmark[]; error?: string; locked?: boolean }> {
+  // 重新加载 token，确保获取最新值（侧边栏可能在后台启动后解锁）
+  await keeperClient.loadToken();
 
+  // 先检查登录状态
+  try {
+    const status = await keeperClient.getStatus();
+    if (status.locked) {
+      return { error: 'Unauthorized', locked: true };
+    }
+  } catch {
+    return { error: 'Unauthorized', locked: true };
+  }
+
+  try {
+    const pageUrl = sender?.tab?.url ?? payload.url;
+    console.log('[Keeper:bg] handleGetMatchingBookmarks called for URL:', pageUrl);
+    const bookmarksResult = await keeperClient.getBookmarks({ limit: 100 });
+    console.log('[Keeper:bg] got bookmarks:', bookmarksResult.data.length);
+    const matched = bookmarksResult.data.filter((bookmark) =>
+      isBookmarkMatchingHostname(bookmark, pageUrl),
+    );
+    console.log('[Keeper:bg] matched bookmarks:', matched.length);
+
+    // 不返回密码（密码是加密格式），只返回账号标识
+    // 密码在使用时通过 GET_DECRYPTED_PASSWORD 按需解密
     const bookmarks: MatchingBookmark[] = matched.map((bookmark) => ({
       bookmarkId: bookmark.id,
       name: bookmark.name,
       accounts: bookmark.accounts.map((account) => ({
         id: account.id,
         username: account.username,
-        password: account.password,
+        // password 不返回，按需解密
       })),
     }));
 
-    sendResponse({ bookmarks });
+    return { bookmarks };
   } catch (error) {
-    sendResponse({ error: getErrorMessage(error) });
+    console.error('[Keeper:bg] handleGetMatchingBookmarks error:', error);
+    return { error: getErrorMessage(error) };
+  }
+}
+
+/**
+ * 获取指定账号的解密后的密码。
+ * 按需解密，确保密码只在需要时才解密。
+ */
+async function handleGetDecryptedPassword(
+  payload: { bookmarkId: string; accountId: number },
+): Promise<{ password?: string; error?: string; locked?: boolean }> {
+  // 重新加载 token，确保获取最新值
+  await keeperClient.loadToken();
+
+  // 先检查登录状态
+  try {
+    const status = await keeperClient.getStatus();
+    if (status.locked) {
+      return { error: 'Unauthorized', locked: true };
+    }
+  } catch {
+    return { error: 'Unauthorized', locked: true };
+  }
+
+  try {
+    console.log('[Keeper:bg] handleGetDecryptedPassword called for bookmark:', payload.bookmarkId, 'account:', payload.accountId);
+    // 调用单条书签 API，传入 decrypt=true 获取明文密码
+    const bookmark = await keeperClient.getBookmark(payload.bookmarkId, true);
+    const account = bookmark.accounts.find(a => a.id === payload.accountId);
+    
+    if (!account) {
+      return { error: 'Account not found' };
+    }
+    
+    console.log('[Keeper:bg] decrypted password for account:', account.username);
+    return { password: account.password };
+  } catch (error) {
+    console.error('[Keeper:bg] handleGetDecryptedPassword error:', error);
+    return { error: getErrorMessage(error) };
   }
 }
 
@@ -276,61 +407,6 @@ async function handleMarkAsUsed(
 }
 
 /**
- * 用户确认信任新证书指纹（证书到期换证时使用）。
- */
-async function handleTrustNewCert(
-  payload: { fingerprint: string },
-  sendResponse: (response: { success?: boolean; error?: string }) => void,
-): Promise<void> {
-  try {
-    await certPinManager.trustNewFingerprint(payload.fingerprint);
-    sendResponse({ success: true });
-  } catch (error) {
-    sendResponse({ error: getErrorMessage(error) });
-  }
-}
-
-/**
- * 获取当前证书固定状态（已固定指纹 + 更新日志）。
- */
-async function handleGetCertPinStatus(
-  sendResponse: (response: {
-    pinned?: { fingerprint: string; pinnedAt: string; lastVerifiedAt: string } | null;
-    updateLog?: Array<{ updatedAt: string; reason: string }>;
-    error?: string;
-  }) => void,
-): Promise<void> {
-  try {
-    const pinned = await certPinManager.getPinnedInfo();
-    const updateLog = await certPinManager.getUpdateLog();
-
-    sendResponse({
-      pinned: pinned ?? null,
-      updateLog: updateLog.map((entry) => ({
-        updatedAt: entry.updatedAt,
-        reason: entry.reason,
-      })),
-    });
-  } catch (error) {
-    sendResponse({ error: getErrorMessage(error) });
-  }
-}
-
-/**
- * 清除所有证书固定数据。
- */
-async function handleClearCertPin(
-  sendResponse: (response: { success?: boolean; error?: string }) => void,
-): Promise<void> {
-  try {
-    await certPinManager.clearPinnedData();
-    sendResponse({ success: true });
-  } catch (error) {
-    sendResponse({ error: getErrorMessage(error) });
-  }
-}
-
-/**
  * 创建右键菜单并监听点击事件，向内容脚本发送生成密码消息。
  */
 function setupContextMenu(): void {
@@ -364,37 +440,25 @@ function setupContextMenu(): void {
 
 export default defineBackground({
   persistent: true,
-  main() {
+  async main() {
+    // 启动时从 storage 加载 token
+    await keeperClient.loadToken();
+    console.log('[Keeper:bg] Token loaded, token exists:', keeperClient.getToken() !== null);
+    
     setupContextMenu();
-
-    certPinManager.setEventListener({
-      onMismatch(expected, actual, requestId) {
-        console.error(
-          `[CertPin] 证书指纹不匹配 (request ${requestId}): 期望 ${expected}, 实际 ${actual}`,
-        );
-        void browser.runtime.sendMessage({
-          type: 'CERT_PIN_MISMATCH',
-          payload: { expected, actual },
-        });
-      },
-      onFirstUse(fingerprint) {
-        console.log(`[CertPin] 首次使用证书: ${fingerprint}`);
-      },
-      onError(message) {
-        console.error(`[CertPin] 错误: ${message}`);
-      },
-    });
-
-    // cert pinning 仅在 HTTPS 模式下启用
-    // 开发环境使用 HTTP，URL pattern 不匹配所以不会拦截
-    certPinManager.start();
 
     browser.commands.onCommand.addListener(async (command) => {
       if (command === 'toggle_sidebar') {
         if (sidebarOpen) {
           browser.sidebarAction.close();
           sidebarOpen = false;
-          keeperClient.lock().catch(() => {});
+          // 根据设置决定是否锁定
+          const result = await browser.storage.local.get(SETTINGS_STORAGE_KEY);
+          const settings = result[SETTINGS_STORAGE_KEY];
+          const lockOnHide = settings ? settings.lockOnHide : true;
+          if (lockOnHide) {
+            keeperClient.lock().catch(() => {});
+          }
         } else {
           browser.sidebarAction.open();
           sidebarOpen = true;
@@ -408,28 +472,28 @@ export default defineBackground({
 
       try {
         const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-        console.log('[Keeper:bg] active tab:', tab?.id, tab?.url);
         if (!tab?.id) {
           return;
         }
 
         await browser.tabs.sendMessage(tab.id, { type: 'FILL_FROM_SHORTCUT' });
-        console.log('[Keeper:bg] FILL_FROM_SHORTCUT sent to tab', tab.id);
-      } catch (err) {
-        console.error('[Keeper:bg] sendMessage failed:', err);
+      } catch {
+        // 忽略发送失败
       }
     });
 
-    browser.runtime.onMessage.addListener((message: KeeperMessage, _sender, sendResponse) => {
+    browser.runtime.onMessage.addListener((message: KeeperMessage, sender, sendResponse) => {
       switch (message.type) {
         case 'GET_AUTH_STATUS': {
-          void handleGetAuthStatus(sendResponse);
-          return true;
+          return handleGetAuthStatus();
         }
 
         case 'GET_MATCHING_BOOKMARKS': {
-          void handleGetMatchingBookmarks(message.payload, sendResponse);
-          return true;
+          return handleGetMatchingBookmarks(message.payload, sender);
+        }
+
+        case 'GET_DECRYPTED_PASSWORD': {
+          return handleGetDecryptedPassword(message.payload);
         }
 
         case 'SAVE_CREDENTIALS': {
@@ -447,24 +511,70 @@ export default defineBackground({
           return true;
         }
 
-        case 'TRUST_NEW_CERT': {
-          void handleTrustNewCert(message.payload, sendResponse);
+        case 'SAVE_PENDING_CREDENTIAL': {
+          savePendingCredential(
+            { ...message.payload, sourceTabId: sender.tab?.id || 0 },
+            sendResponse,
+          );
           return true;
         }
 
-        case 'GET_CERT_PIN_STATUS': {
-          void handleGetCertPinStatus(sendResponse);
+        case 'GET_PENDING_CREDENTIAL': {
+          getPendingCredential(sendResponse);
           return true;
         }
 
-        case 'CLEAR_CERT_PIN': {
-          void handleClearCertPin(sendResponse);
+        case 'CLEAR_PENDING_CREDENTIAL': {
+          clearPendingCredential(sendResponse);
           return true;
         }
 
         default:
           sendResponse({ error: 'Unsupported message type' });
           return false;
+      }
+    });
+
+    // 监听标签页更新，处理页面跳转后恢复通知栏
+    browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+      if (changeInfo.status !== 'complete' || !tab.url) {
+        return;
+      }
+
+      // 检查是否有待处理凭据
+      if (!pendingCredential) return;
+
+      // 检查是否过期
+      if (Date.now() - pendingCredential.capturedAt > PENDING_TIMEOUT) {
+        pendingCredential = null;
+        return;
+      }
+
+      // 检查URL是否匹配 (同一域名)
+      try {
+        const pendingHostname = new URL(pendingCredential.url).hostname;
+        const currentHostname = new URL(tab.url).hostname;
+
+        if (pendingHostname === currentHostname) {
+          console.log('[Keeper:bg] Restoring notification bar for', currentHostname);
+          // 发送消息到新页面的 content script 显示通知
+          try {
+            await browser.tabs.sendMessage(tabId, {
+              type: 'SHOW_PENDING_CREDENTIAL',
+              payload: {
+                username: pendingCredential.username,
+                password: pendingCredential.password,
+                originalUrl: pendingCredential.url,
+              },
+            });
+            // 发送后清除，避免重复显示
+            pendingCredential = null;
+          } catch {
+            // 页面可能不支持 content script，忽略错误
+          }
+        }
+      } catch {
+        // URL解析错误，忽略
       }
     });
   },

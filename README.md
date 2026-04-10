@@ -9,7 +9,7 @@ keeper（后端 API）──▶  keeper-firefox（本仓库，Firefox 扩展）
                   └──▶  keeper-chrome（Chrome 扩展）
 ```
 
-keeper 是本地自部署的后端服务，keeper-firefox 通过 HTTPS REST API 与其通信，所有密码数据均存储在本机，不经过任何云服务。
+keeper 是本地自部署的后端服务，keeper-firefox 通过 HTTP REST API 与其通信，所有密码数据均存储在本机，不经过任何云服务。
 
 ## 技术栈
 
@@ -28,13 +28,13 @@ keeper 是本地自部署的后端服务，keeper-firefox 通过 HTTPS REST API 
 - **侧边栏界面**：以 Firefox 侧边栏形式运行，快捷键 `Alt+.` 切换显示
 - **自动填充**：检测登录页面，`Alt+P` 一键填充账号密码，支持多账号选择
 - **密码生成**：右键菜单快速生成随机密码，可自定义长度和字符集
-- **证书固定**：TOFU（首次使用信任）策略，固定后端 HTTPS 证书指纹，防止中间人攻击
+- **本地通信**：与后端通过 HTTP 在本地通信，数据不经过网络
 - **数据库管理**：支持新建、切换、删除本地数据库
 - **解锁 / 锁定**：主密码解锁，会话 1 小时自动过期
 
 ## 前置条件
 
-需要先在本机运行 [keeper](https://github.com/kimiellen/keeper) 后端服务（HTTPS，默认端口 8443）。
+需要先在本机运行 [keeper](https://github.com/kimiellen/keeper) 后端服务（HTTP，默认端口 51000）。
 
 ## 安装扩展
 
@@ -80,11 +80,11 @@ npm run zip
 
 | 权限 | 用途 |
 |------|------|
-| `storage` | 存储证书指纹和用户设置 |
+| `storage` | 存储用户设置 |
 | `activeTab` | 获取当前标签页 URL 用于书签匹配 |
 | `contextMenus` | 右键菜单「生成密码」 |
 | `tabs` | 监听标签页切换 |
-| `webRequest` / `webRequestBlocking` | 拦截 HTTPS 请求以验证证书指纹 |
+| `webRequest` / `webRequestBlocking` | 拦截 HTTP 请求 |
 | `<all_urls>` | 自动填充功能需要访问任意页面 |
 
 ## 项目结构
@@ -93,20 +93,19 @@ npm run zip
 keeper-firefox/
 ├── entrypoints/
 │   ├── sidepanel/            # 侧边栏主界面（Vue SPA）
-│   ├── background.ts         # Service Worker（自动填充、密码生成、证书验证）
+│   ├── background.ts         # Service Worker（自动填充、密码生成）
 │   ├── autofill.content.ts   # 内容脚本（页面注入，填充表单）
 │   └── capture.content.ts    # 内容脚本（捕获登录信息）
 ├── api/                      # Keeper 后端 API 客户端
 ├── stores/                   # Pinia 状态管理
 ├── utils/
-│   └── security/             # 证书固定（TOFU）
+│   └── security/             # 安全工具（预留）
 └── public/                   # 静态资源（图标等）
 ```
 
 ## 安全说明
 
-- 与后端的通信全程使用 HTTPS
-- 证书固定（TOFU）：首次连接后固定证书指纹，后续连接若指纹变更会阻断请求并提示用户
+- 与后端的通信全程使用 HTTP（本地通信，不经过网络）
 - 扩展本身不存储任何密码明文，所有加密由后端完成
 - 会话 1 小时自动过期，锁定后密钥立即从内存消失
 

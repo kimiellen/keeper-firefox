@@ -1,6 +1,6 @@
 {
   "name": "keeper-firefox",
-  "version": "1.0.0",
+  "version": "0.26.4",
   "description": "Firefox 浏览器插件 - 密码管理器",
   "type": "module",
   "scripts": {

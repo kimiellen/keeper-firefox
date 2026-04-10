@@ -74,9 +74,24 @@ export const useDatabaseStore = defineStore('database', () => {
     }
   }
 
+  async function addDatabase(path: string) {
+    loading.value = true;
+    error.value = null;
+    try {
+      await keeperClient.addDatabase({ path });
+      await fetchList(); // 刷新列表
+      return true;
+    } catch (e: any) {
+      error.value = e instanceof KeeperApiError ? e.detail : e.message;
+      return false;
+    } finally {
+      loading.value = false;
+    }
+  }
+
   function clearError() {
     error.value = null;
   }
 
-  return { databases, currentPath, loading, error, currentDatabase, currentName, fetchList, openDatabase, createDatabase, removeDatabase, clearError };
+  return { databases, currentPath, loading, error, currentDatabase, currentName, fetchList, openDatabase, createDatabase, removeDatabase, addDatabase, clearError };
 });

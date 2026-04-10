@@ -26,7 +26,7 @@
 **系统要求**：
 - Python 3.14+
 - uv 包管理器
-- mkcert（HTTPS 证书生成）
+- Rust 工具链（后端是 Rust 项目）
 
 **初始化**：
 ```bash
@@ -41,15 +41,9 @@ uv sync
 # 激活虚拟环境
 source .venv/bin/activate
 
-# 生成本地 HTTPS 证书
-mkdir -p certs
-mkcert -install
-mkcert -key-file certs/localhost-key.pem -cert-file certs/localhost.pem localhost 127.0.0.1 ::1
-
-# 运行开发服务器
-uvicorn src.main:app --host 127.0.0.1 --port 8443 --reload \
-  --ssl-keyfile certs/localhost-key.pem \
-  --ssl-certfile certs/localhost.pem
+# 构建并运行开发服务器
+cd ~/workspace/projects/keeper
+cargo run -- --port 51000
 ```
 
 ---
@@ -711,7 +705,7 @@ def example():
 
 **禁止提交**：
 - `.env` 文件（包含密钥）
-- `certs/*.pem`（HTTPS 证书）
+- 密钥文件（`.env` 中的 `SECRET_KEY`）
 - `*.db`（数据库文件）
 - `*.log`（日志文件）
 
@@ -748,7 +742,7 @@ node_modules/
 - [ ] 是否限制 CORS？
 
 **前端安全**：
-- [ ] 是否验证证书指纹？
+- [ ] 是否处理所有错误情况？
 - [ ] 是否在超时后清理内存？
 - [ ] 是否使用 `browser.storage.session`（而非 localStorage）？
 
@@ -774,10 +768,9 @@ node_modules/
 
 **后端**：
 ```bash
-# 运行开发服务器
-uvicorn src.main:app --reload --host 127.0.0.1 --port 8443 \
-  --ssl-keyfile certs/localhost-key.pem \
-  --ssl-certfile certs/localhost.pem
+# 构建并运行开发服务器
+cd ~/workspace/projects/keeper
+cargo run -- --port 51000
 
 # 格式化 + Linting
 black src/ && ruff check src/ --fix
@@ -836,11 +829,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.bashrc
 ```
 
-**问题：mkcert 证书不受信任**
+**问题：后端连接失败**
 ```bash
-# 解决：重新安装 CA
-mkcert -uninstall
-mkcert -install
+# 解决：确认后端服务已启动并监听正确端口
+curl http://127.0.0.1:51000/api/health
 ```
 
 **问题：Firefox 扩展加载失败**
