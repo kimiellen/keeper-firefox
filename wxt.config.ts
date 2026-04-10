@@ -7,7 +7,7 @@ export default defineConfig({
   }),
   manifest: {
     name: 'Keeper',
-    version: '0.26.04',
+    version: '0.26.4',
     description: '密码管理器',
     browser_specific_settings: {
       gecko: {
