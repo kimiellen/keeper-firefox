@@ -22,7 +22,6 @@ export default defineConfig({
     permissions: [
       'storage',
       'activeTab',
-      'contextMenus',
       'tabs',
       'notifications',
       '<all_urls>'

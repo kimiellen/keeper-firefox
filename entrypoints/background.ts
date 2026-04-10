@@ -16,16 +16,6 @@ type KeeperMessage =
   | { type: 'GET_MATCHING_BOOKMARKS'; payload: { url: string } }
   | { type: 'GET_DECRYPTED_PASSWORD'; payload: { bookmarkId: string; accountId: number } }
   | { type: 'SAVE_CREDENTIALS'; payload: { url: string; username: string; password: string } }
-  | {
-      type: 'GENERATE_PASSWORD';
-      payload: {
-        length: number;
-        includeLowercase: boolean;
-        includeUppercase: boolean;
-        includeNumbers: boolean;
-        includeSpecial: boolean;
-      };
-    }
   | { type: 'MARK_AS_USED'; payload: { bookmarkId: string; url?: string; accountId?: number } }
   | { type: 'LOCK_AND_HIDE' }
   | { type: 'FOCUS_INPUT' }
@@ -33,22 +23,8 @@ type KeeperMessage =
   | { type: 'GET_PENDING_CREDENTIAL' }
   | { type: 'CLEAR_PENDING_CREDENTIAL' };
 
-interface PasswordOptions {
-  length: number;
-  includeLowercase: boolean;
-  includeUppercase: boolean;
-  includeNumbers: boolean;
-  includeSpecial: boolean;
-}
-
-const CONTEXT_MENU_ID = 'keeper-generate-password';
 let sidebarOpen = false;
 const SETTINGS_STORAGE_KEY = 'keeper_settings';
-const LOWERCASE = 'abcdefghijklmnopqrstuvwxyz';
-const UPPERCASE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-const NUMBERS = '0123456789';
-
-const SPECIAL = '!@#$%^&*()-_=+[]{};:,.<>?/|';
 
 // ============ 待保存凭据状态管理 ============
 
@@ -133,69 +109,6 @@ function isBookmarkMatchingHostname(bookmark: Bookmark, pageUrl: string): boolea
       return false;
     }
   });
-}
-
-/**
- * 使用拒绝采样生成无偏随机索引。
- */
-function getRandomInt(max: number): number {
-  if (max <= 0) {
-    throw new Error('max must be greater than 0');
-  }
-
-  const uint32Max = 0x100000000;
-  const limit = Math.floor(uint32Max / max) * max;
-  const buffer = new Uint32Array(1);
-
-  do {
-    crypto.getRandomValues(buffer);
-  } while (buffer[0] >= limit);
-
-  return buffer[0] % max;
-}
-
-/**
- * 原地打乱字符数组。
- */
-function shuffleInPlace(chars: string[]): void {
-  for (let index = chars.length - 1; index > 0; index -= 1) {
-    const randomIndex = getRandomInt(index + 1);
-    [chars[index], chars[randomIndex]] = [chars[randomIndex], chars[index]];
-  }
-}
-
-/**
- * 根据配置生成密码，并保证每个启用字符集至少出现一次。
- */
-function generatePassword(options: PasswordOptions): string {
-  const groups: string[] = [];
-
-  if (options.includeLowercase) groups.push(LOWERCASE);
-  if (options.includeUppercase) groups.push(UPPERCASE);
-  if (options.includeNumbers) groups.push(NUMBERS);
-  if (options.includeSpecial) groups.push(SPECIAL);
-
-  if (groups.length === 0) {
-    throw new Error('At least one character set must be enabled');
-  }
-
-  if (options.length < groups.length) {
-    throw new Error('Password length is too short for selected character sets');
-  }
-
-  const allChars = groups.join('');
-  const result: string[] = [];
-
-  for (const group of groups) {
-    result.push(group[getRandomInt(group.length)]);
-  }
-
-  while (result.length < options.length) {
-    result.push(allChars[getRandomInt(allChars.length)]);
-  }
-
-  shuffleInPlace(result);
-  return result.join('');
 }
 
 /**
@@ -373,21 +286,6 @@ async function handleSaveCredentials(
 }
 
 /**
- * 按配置生成密码并返回。
- */
-async function handleGeneratePassword(
-  payload: PasswordOptions,
-  sendResponse: (response: { password?: string; error?: string }) => void,
-): Promise<void> {
-  try {
-    const password = generatePassword(payload);
-    sendResponse({ password });
-  } catch (error) {
-    sendResponse({ error: getErrorMessage(error) });
-  }
-}
-
-/**
  * 标记书签或账号已使用。
  */
 async function handleMarkAsUsed(
@@ -406,46 +304,12 @@ async function handleMarkAsUsed(
   }
 }
 
-/**
- * 创建右键菜单并监听点击事件，向内容脚本发送生成密码消息。
- */
-function setupContextMenu(): void {
-  browser.runtime.onInstalled.addListener(() => {
-    browser.contextMenus.create({
-      id: CONTEXT_MENU_ID,
-      title: 'Keeper: 生成密码',
-      contexts: ['editable'],
-    });
-  });
-
-  browser.contextMenus.onClicked.addListener(async (info, tab) => {
-    if (info.menuItemId !== CONTEXT_MENU_ID || !tab?.id) {
-      return;
-    }
-
-    const password = generatePassword({
-      length: 16,
-      includeLowercase: true,
-      includeUppercase: true,
-      includeNumbers: true,
-      includeSpecial: false,
-    });
-
-    await browser.tabs.sendMessage(tab.id, {
-      type: 'FILL_GENERATED_PASSWORD',
-      password,
-    });
-  });
-}
-
 export default defineBackground({
   persistent: true,
   async main() {
     // 启动时从 storage 加载 token
     await keeperClient.loadToken();
     console.log('[Keeper:bg] Token loaded, token exists:', keeperClient.getToken() !== null);
-    
-    setupContextMenu();
 
     browser.commands.onCommand.addListener(async (command) => {
       if (command === 'toggle_sidebar') {
@@ -498,11 +362,6 @@ export default defineBackground({
 
         case 'SAVE_CREDENTIALS': {
           void handleSaveCredentials(message.payload, sendResponse);
-          return true;
-        }
-
-        case 'GENERATE_PASSWORD': {
-          void handleGeneratePassword(message.payload, sendResponse);
           return true;
         }
 

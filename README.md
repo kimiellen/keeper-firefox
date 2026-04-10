@@ -1,113 +1,235 @@
 # Keeper Firefox
 
-本地密码管理器的 Firefox 浏览器扩展前端，配合 [keeper](https://github.com/kimiellen/keeper) 后端使用。
+本地密码管理器的 Firefox 浏览器扩展，配合 [keeper](https://github.com/kimiellen/keeper) 后端服务使用。
 
-## 项目关系
+## 项目架构
 
 ```
-keeper（后端 API）──▶  keeper-firefox（本仓库，Firefox 扩展）
-                  └──▶  keeper-chrome（Chrome 扩展）
+keeper-firefox (本扩展) ←────HTTP────→ keeper (后端服务)
+     ↓                                      ↓
+  Firefox 侧边栏                        本地数据库
 ```
 
-keeper 是本地自部署的后端服务，keeper-firefox 通过 HTTP REST API 与其通信，所有密码数据均存储在本机，不经过任何云服务。
+所有密码数据存储在本地，通过 HTTP 与后端通信，不经过任何云服务。
 
 ## 技术栈
 
 | 层级 | 技术 |
 |------|------|
-| 扩展框架 | WXT 0.21+ |
+| 扩展框架 | [WXT](https://wxt.dev/) 0.21 |
 | 前端框架 | Vue 3 + TypeScript |
 | 状态管理 | Pinia |
 | UI 组件库 | Element Plus |
-| 动画 | Motion |
 | 构建工具 | Vite |
-| 包管理 | npm |
+| 包管理器 | npm |
 
-## 主要特性
+## 功能特性
 
-- **侧边栏界面**：以 Firefox 侧边栏形式运行，快捷键 `Alt+.` 切换显示
-- **自动填充**：检测登录页面，`Alt+P` 一键填充账号密码，支持多账号选择
-- **密码生成**：右键菜单快速生成随机密码，可自定义长度和字符集
-- **本地通信**：与后端通过 HTTP 在本地通信，数据不经过网络
-- **数据库管理**：支持新建、切换、删除本地数据库
-- **解锁 / 锁定**：主密码解锁，会话 1 小时自动过期
+### 侧边栏主界面
+- **快捷键切换**: `Alt+.` 打开/关闭侧边栏
+- **多关键词搜索**: 空格分隔多个关键词进行 AND 搜索
+- **标签过滤**: 多选标签进行 AND 过滤
+- **关联过滤**: 按联系人/关系过滤
+- **快捷操作**: 
+  - 单击打开书签网址
+  - 复制用户名/密码
+  - 多网址/多账号选择弹窗
+  - 键盘导航 (上下箭头选择，回车确认)
 
-## 前置条件
+### 自动填充
+- **快捷键**: `Alt+P` 一键填充当前页面账号密码
+- **智能表单检测**: 自动识别用户名/密码输入框
+- **多账号选择**: 当站点有多个账号时显示下拉选择框
+- **分步登录支持**: 支持用户名和密码分开输入的登录流程
+- **按需解密**: 密码在使用时才向后端请求解密
 
-需要先在本机运行 [keeper](https://github.com/kimiellen/keeper) 后端服务（HTTP，默认端口 51000）。
+### 登录捕获
+- **自动检测**: 监听表单提交、按钮点击、Enter 键等登录行为
+- **智能识别**: 排除搜索框、验证码、OTP 等非密码字段
+- **通知提示**: 检测到新账号时顶部显示保存提示条
+- **状态检查**: 自动检查账号是否已存在，避免重复提示
+- **跨页面保持**: 登录后跳转页面仍可显示保存提示
+- **可关闭**: 设置中可禁用登录捕获功能
 
-## 安装扩展
+### 数据库管理
+- **多数据库支持**: 创建、切换、删除本地数据库文件
+- **首次初始化**: 引导用户设置主密码和邮箱
 
-### 从源码构建安装
+### 数据导入导出
+- **导出**: 导出为 JSON 格式备份
+- **导入**: 支持 Keeper JSON 格式导入
+- **冲突处理**: 支持跳过/重命名/覆盖策略
 
-```bash
-git clone https://github.com/kimiellen/keeper-firefox.git
-cd keeper-firefox
-npm install
-npm run build
-```
-
-构建完成后：
-
-1. 打开 Firefox，地址栏输入 `about:debugging`
-2. 点击「此 Firefox」→「临时载入附加组件」
-3. 选择 `.output/firefox-mv2/manifest.json`
-
-### 打包为 .zip 提交 AMO
-
-```bash
-npm run zip
-```
-
-## 开发
-
-```bash
-# 启动开发模式（热重载）
-npm run dev
-
-# 构建生产版本
-npm run build
-
-# 打包为 zip
-npm run zip
-```
-
-开发模式下，WXT 会自动在 Firefox 中加载扩展并监听文件变化。
-
-## 权限说明
-
-扩展申请以下 Firefox 权限：
-
-| 权限 | 用途 |
-|------|------|
-| `storage` | 存储用户设置 |
-| `activeTab` | 获取当前标签页 URL 用于书签匹配 |
-| `contextMenus` | 右键菜单「生成密码」 |
-| `tabs` | 监听标签页切换 |
-| `webRequest` / `webRequestBlocking` | 拦截 HTTP 请求 |
-| `<all_urls>` | 自动填充功能需要访问任意页面 |
+### 主题与设置
+- **明暗主题**: 支持浅色/深色/跟随系统
+- **会话超时**: 可设置自动锁定时间
+- **隐藏锁定**: 可选关闭侧边栏时自动锁定
 
 ## 项目结构
 
 ```
 keeper-firefox/
-├── entrypoints/
-│   ├── sidepanel/            # 侧边栏主界面（Vue SPA）
-│   ├── background.ts         # Service Worker（自动填充、密码生成）
-│   ├── autofill.content.ts   # 内容脚本（页面注入，填充表单）
-│   └── capture.content.ts    # 内容脚本（捕获登录信息）
-├── api/                      # Keeper 后端 API 客户端
-├── stores/                   # Pinia 状态管理
-├── utils/
-│   └── security/             # 安全工具（预留）
-└── public/                   # 静态资源（图标等）
+├── entrypoints/               # 扩展入口点
+│   ├── sidepanel/             # 侧边栏主界面 (Vue SPA)
+│   │   ├── main.ts            # Vue 应用入口
+│   │   ├── App.vue            # 根组件（视图路由管理）
+│   │   ├── index.html         # HTML 模板
+│   │   └── views/
+│   │       ├── Unlock.vue     # 解锁/登录视图
+│   │       ├── Main.vue       # 书签列表主视图
+│   │       ├── BookmarkEdit.vue  # 书签编辑视图
+│   │       └── Settings.vue   # 设置视图
+│   ├── background.ts          # Service Worker
+│   ├── autofill.content.ts    # 内容脚本 - 自动填充
+│   └── capture.content.ts     # 内容脚本 - 登录捕获
+│
+├── api/                       # Keeper API 客户端
+│   ├── client.ts              # KeeperClient 类（完整 REST API）
+│   ├── types.ts               # TypeScript 类型定义
+│   └── __tests__/             # 测试文件
+│
+├── stores/                    # Pinia 状态管理
+│   ├── auth.ts                # 认证状态（解锁/锁定）
+│   ├── bookmarks.ts           # 书签 CRUD
+│   ├── tags.ts                # 标签管理
+│   ├── relations.ts           # 联系人/关系管理
+│   ├── database.ts            # 数据库管理
+│   └── settings.ts            # 用户设置（主题、生成器等）
+│
+├── utils/                     # 工具函数
+│   ├── tagColors.ts           # 标签颜色处理
+│   └── security/              # 安全工具
+│
+├── public/                    # 静态资源
+│   └── icons/                 # 扩展图标
+│
+├── wxt.config.ts              # WXT 扩展配置
+├── package.json               # 依赖和脚本
+└── tsconfig.json              # TypeScript 配置
 ```
 
-## 安全说明
+## 安装与运行
 
-- 与后端的通信全程使用 HTTP（本地通信，不经过网络）
-- 扩展本身不存储任何密码明文，所有加密由后端完成
-- 会话 1 小时自动过期，锁定后密钥立即从内存消失
+### 前置条件
+
+需要先在本机运行 keeper 后端服务，默认监听 `http://127.0.0.1:51000`。
+
+### 从源码安装
+
+```bash
+# 克隆仓库
+git clone https://github.com/kimiellen/keeper-firefox.git
+cd keeper-firefox
+
+# 安装依赖
+npm install
+
+# 开发模式（热重载）
+npm run dev
+
+# 生产构建
+npm run build
+
+# 打包为 zip（用于 AMO 提交）
+npm run zip
+```
+
+### 加载到 Firefox
+
+1. 构建完成后，打开 Firefox 访问 `about:debugging`
+2. 点击「此 Firefox」→「临时载入附加组件」
+3. 选择 `.output/firefox-mv2/manifest.json`
+
+## 权限说明
+
+| 权限 | 用途 |
+|------|------|
+| `storage` | 存储会话 token 和用户设置 |
+| `activeTab` | 获取当前标签页 URL 用于书签匹配 |
+| `tabs` | 监听标签页切换、打开新标签页 |
+| `notifications` | 显示通知 |
+| `<all_urls>` | 自动填充和登录捕获需要访问任意页面 |
+
+## 通信机制
+
+### 后台脚本 (background.ts)
+- 启动时从 `storage.local` 加载会话 token
+- 响应快捷键命令（切换侧边栏、填充凭据）
+- 管理待保存凭据状态（5分钟超时）
+
+### 内容脚本
+- **autofill.content.ts**: 注入所有页面，处理自动填充逻辑
+- **capture.content.ts**: 仅注入主页面（非 iframe），监听登录行为
+
+### 消息类型
+
+```typescript
+// 认证相关
+{ type: 'GET_AUTH_STATUS' }
+{ type: 'GET_MATCHING_BOOKMARKS', payload: { url: string } }
+{ type: 'GET_DECRYPTED_PASSWORD', payload: { bookmarkId: string, accountId: number } }
+
+// 凭据保存
+{ type: 'SAVE_CREDENTIALS', payload: { url: string, username: string, password: string } }
+{ type: 'SAVE_PENDING_CREDENTIAL', payload: { url: string, hostname: string, username: string, password: string } }
+{ type: 'GET_PENDING_CREDENTIAL' }
+{ type: 'CLEAR_PENDING_CREDENTIAL' }
+
+// 使用记录
+{ type: 'MARK_AS_USED', payload: { bookmarkId: string, url?: string, accountId?: number } }
+```
+
+## 安全设计
+
+### 本地通信
+- 与后端通过 HTTP 在本地通信（`127.0.0.1:51000`）
+- 使用 Bearer Token 进行身份验证
+- Token 存储在 `browser.storage.local`，后台脚本和侧边栏共享
+
+### 密码处理
+- 前端不存储任何密码明文
+- 密码按需解密：使用时调用 `GET_DECRYPTED_PASSWORD` 获取
+- 会话超时后自动锁定，Token 清除
+
+### 内容脚本隔离
+- 使用 Shadow DOM 渲染下拉选择框和通知条，避免样式冲突
+- 动画效果支持 `prefers-reduced-motion` 无障碍设置
+
+## 快捷键
+
+| 快捷键 | 功能 |
+|--------|------|
+| `Alt+.` | 切换 Keeper 侧边栏 |
+| `Alt+P` | 填充当前页面账号密码 |
+
+## API 端点
+
+后端 API 基础地址：`http://127.0.0.1:51000/api`
+
+主要端点：
+- `POST /auth/unlock` - 解锁/登录
+- `POST /auth/lock` - 锁定
+- `GET /auth/status` - 检查会话状态
+- `GET /bookmarks` - 获取书签列表
+- `GET /bookmarks/:id?decrypt=true` - 获取单个书签（解密密码）
+- `POST /bookmarks` - 创建书签
+- `PATCH /bookmarks/:id` - 部分更新书签
+- `GET /tags` - 获取标签列表
+- `GET /relations` - 获取关系列表
+- `GET /db/list` - 获取数据库列表
+- `POST /db/open` - 切换数据库
+
+## 开发
+
+### 代码规范
+
+- **Vue 组件**: 使用 `<script setup lang="ts">` 语法
+- **命名**: 组件使用 PascalCase，组合式函数使用 `use` 前缀
+- **状态管理**: 使用 Pinia 组合式 API 模式
+
+### 测试
+
+测试文件位于 `api/__tests__/` 和 `utils/__tests__/` 目录，设计为在浏览器控制台中手动运行。
 
 ## 许可证
 

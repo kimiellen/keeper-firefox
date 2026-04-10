@@ -35,11 +35,6 @@ export default defineContentScript({
       bookmarks: MatchingBookmark[];
     }
 
-    interface GeneratedPasswordMessage {
-      type: "FILL_GENERATED_PASSWORD";
-      password: string;
-    }
-
     interface AccountChoice {
       bookmarkId: string;
       bookmarkName: string;
@@ -754,24 +749,6 @@ export default defineContentScript({
         return;
       }
 
-      const payload = message as Partial<GeneratedPasswordMessage>;
-      if (payload.type !== "FILL_GENERATED_PASSWORD" || typeof payload.password !== "string") {
-        return;
-      }
-
-      const activeElement = document.activeElement;
-      const targetField =
-        activeElement instanceof HTMLInputElement &&
-        activeElement.type.toLowerCase() === "password" &&
-        isVisibleInput(activeElement)
-          ? activeElement
-          : getVisiblePasswordFields()[0] ?? null;
-
-      if (!targetField) {
-        return;
-      }
-
-      setFieldValue(targetField, payload.password);
     };
 
     browser.runtime.onMessage.addListener(onRuntimeMessage);
