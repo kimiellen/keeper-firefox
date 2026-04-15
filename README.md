@@ -134,12 +134,6 @@ npm run build
 npm run zip
 ```
 
-### 加载到 Firefox
-
-1. 构建完成后，打开 Firefox 访问 `about:debugging`
-2. 点击「此 Firefox」→「临时载入附加组件」
-3. 选择 `.output/firefox-mv2/manifest.json`
-
 ## 权限说明
 
 | 权限 | 用途 |
