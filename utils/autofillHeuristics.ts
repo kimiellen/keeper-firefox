@@ -2,6 +2,34 @@ export function is163LoginHost(hostname: string): boolean {
   return hostname === 'mail.163.com' || hostname === 'email.163.com';
 }
 
+function getQqMailHostnames(url: URL): string[] {
+  const hostname = url.hostname.toLowerCase();
+
+  if (hostname === 'mail.qq.com' || hostname === 'wx.mail.qq.com') {
+    return ['mail.qq.com', 'wx.mail.qq.com'];
+  }
+
+  if (hostname === 'xui.ptlogin2.qq.com' && url.pathname.toLowerCase() === '/cgi-bin/xlogin') {
+    const appId = url.searchParams.get('appid') ?? '';
+    const serviceUrl = url.searchParams.get('s_url') ?? '';
+
+    if (appId === '716027609') {
+      return ['mail.qq.com', 'wx.mail.qq.com'];
+    }
+
+    try {
+      const parsedServiceUrl = new URL(serviceUrl);
+      if (parsedServiceUrl.hostname.toLowerCase() === 'wx.mail.qq.com') {
+        return ['mail.qq.com', 'wx.mail.qq.com'];
+      }
+    } catch {
+      // ignore invalid nested URLs from unrelated ptlogin flows
+    }
+  }
+
+  return [];
+}
+
 export function is163AutofillContext(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -24,6 +52,11 @@ export function getAutofillMatchingHostnames(url: string): string[] {
     const hostname = parsed.hostname.toLowerCase();
     if (!hostname) {
       return [];
+    }
+
+    const qqMailHostnames = getQqMailHostnames(parsed);
+    if (qqMailHostnames.length > 0) {
+      return qqMailHostnames;
     }
 
     if (hostname === 'dl.reg.163.com') {

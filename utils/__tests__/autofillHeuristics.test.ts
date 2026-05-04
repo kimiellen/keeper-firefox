@@ -55,6 +55,21 @@ function runTests(): void {
     'does not match unrelated pages as 163 autofill contexts',
   );
   assert(
+    getAutofillMatchingHostnames('https://wx.mail.qq.com/?cancel_login=true&from=upexpected_login_redirect').includes('mail.qq.com'),
+    'maps wx.mail.qq.com to mail.qq.com for QQ Mail bookmark matching',
+  );
+  const qqIframeHostnames = getAutofillMatchingHostnames(
+    'https://xui.ptlogin2.qq.com/cgi-bin/xlogin?appid=716027609&style=33&s_url=https%3A%2F%2Fwx.mail.qq.com%2F',
+  );
+  assert(
+    qqIframeHostnames.includes('mail.qq.com'),
+    'maps QQ Mail ptlogin iframe to mail.qq.com for bookmark matching',
+  );
+  assert(
+    qqIframeHostnames.includes('wx.mail.qq.com'),
+    'keeps wx.mail.qq.com as a QQ Mail candidate hostname when matching ptlogin iframe pages',
+  );
+  assert(
     getAutofillMatchingHostnames('https://mail.163.com/').includes('mail.163.com'),
     'uses top-level 163 host directly for bookmark matching',
   );
@@ -75,6 +90,14 @@ function runTests(): void {
       'https://dl.reg.163.com/webzj/v1.0.1/pub/index_dl2_new.html?pkid=CvViHzl&product=mail163',
     ])[0] === 'mail.163.com',
     'merges multiple candidate URLs without introducing cross-site 163 aliases',
+  );
+  const qqMergedHostnames = getAutofillMatchingHostnamesForUrls([
+    'https://wx.mail.qq.com/?cancel_login=true&from=upexpected_login_redirect',
+    'https://xui.ptlogin2.qq.com/cgi-bin/xlogin?appid=716027609&style=33&s_url=https%3A%2F%2Fwx.mail.qq.com%2F',
+  ]);
+  assert(
+    qqMergedHostnames.includes('mail.qq.com') && qqMergedHostnames.includes('wx.mail.qq.com'),
+    'merges QQ Mail top-level and ptlogin iframe URLs into the same bookmark-matching hostname set',
   );
 
   assert(
