@@ -1,3 +1,5 @@
+import { is163AutofillContext, pick163CredentialFields } from '../utils/autofillHeuristics';
+
 export default defineContentScript({
   matches: ["<all_urls>"],
   runAt: "document_idle",
@@ -327,6 +329,164 @@ export default defineContentScript({
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
+    function get163LoginFields(): {
+      usernameField: HTMLInputElement | null;
+      passwordField: HTMLInputElement | null;
+      passwordProxyField: HTMLInputElement | null;
+    } | null {
+      if (!is163AutofillContext(window.location.href)) {
+        return null;
+      }
+
+      const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('input')).filter((field) => {
+        if (!isVisibleInput(field) || isInSearchContext(field)) {
+          return false;
+        }
+
+        return true;
+      });
+
+      const pickedFields = pick163CredentialFields(inputs.map((field) => ({
+        field,
+        id: field.id,
+        name: field.name,
+        type: field.type,
+        dataLoginName: field.dataset.loginname,
+      })));
+
+      const usernameField = pickedFields.usernameField?.field ?? null;
+      const passwordField = pickedFields.passwordField?.field ?? null;
+      const passwordProxyField = pickedFields.passwordProxyField?.field ?? null;
+
+      if (!usernameField && !passwordField && !passwordProxyField) {
+        return null;
+      }
+
+      return { usernameField, passwordField, passwordProxyField };
+    }
+
+    function setFieldValueWithNativeSetter(field: HTMLInputElement, value: string): void {
+      field.focus();
+
+      const prototype = Object.getPrototypeOf(field) as HTMLInputElement;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+      if (descriptor?.set) {
+        descriptor.set.call(field, value);
+      } else {
+        field.value = value;
+      }
+
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.dispatchEvent(new Event('change', { bubbles: true }));
+      playFillAnimation(field);
+    }
+
+    async function fillCredentialsFor163Mail(
+      fields: { usernameField: HTMLInputElement | null; passwordField: HTMLInputElement | null; passwordProxyField: HTMLInputElement | null },
+      choice: AccountChoice,
+    ): Promise<void> {
+      const username = choice.account.username ?? '';
+
+      let password = '';
+      try {
+        const response = await browser.runtime.sendMessage({
+          type: 'GET_DECRYPTED_PASSWORD',
+          payload: {
+            bookmarkId: choice.bookmarkId,
+            accountId: choice.account.id,
+          },
+        }) as { password?: string; error?: string; locked?: boolean };
+
+        if (response.locked) {
+          showNotification('请先解锁 Keeper');
+          return;
+        }
+        if (response.error) {
+          console.error('[Keeper:content] Failed to decrypt password:', response.error);
+          showNotification('解密密码失败');
+          return;
+        }
+        password = response.password ?? '';
+      } catch (error) {
+        console.error('[Keeper:content] Error requesting decrypted password:', error);
+        showNotification('获取密码失败');
+        return;
+      }
+
+      if (fields.usernameField && username) {
+        setFieldValueWithNativeSetter(fields.usernameField, username);
+      }
+
+      if (password) {
+        await delay(FILL_ANIMATION_DURATION + 100);
+
+        if (fields.passwordProxyField) {
+          setFieldValueWithNativeSetter(fields.passwordProxyField, password);
+        }
+
+        if (fields.passwordField && fields.passwordField !== fields.passwordProxyField) {
+          setFieldValueWithNativeSetter(fields.passwordField, password);
+          fields.passwordField.setAttribute(KEEPER_FILLED_ATTR, '1');
+
+          const onManualInput = (): void => {
+            fields.passwordField?.removeAttribute(KEEPER_FILLED_ATTR);
+            fields.passwordField?.removeEventListener('input', onManualInput);
+          };
+          fields.passwordField.addEventListener('input', onManualInput);
+        }
+      }
+
+      await sendRuntimeMessage<{ success: boolean }>({
+        type: 'MARK_AS_USED',
+        bookmarkId: choice.bookmarkId,
+        url: window.location.href,
+        accountId: choice.account.id,
+      });
+    }
+
+    async function tryFill163MailFromShortcut(): Promise<boolean> {
+      const login163Fields = get163LoginFields();
+
+      if (!login163Fields || (!login163Fields.passwordField && !login163Fields.passwordProxyField)) {
+        return false;
+      }
+
+      const bookmarks = await getMatchingBookmarks();
+      if (bookmarks.length === 0) {
+        return true;
+      }
+
+      const choices: AccountChoice[] = [];
+      for (const bookmark of bookmarks) {
+        for (const account of bookmark.accounts) {
+          choices.push({
+            bookmarkId: bookmark.bookmarkId,
+            bookmarkName: bookmark.name,
+            account,
+          });
+        }
+      }
+
+      if (choices.length === 0) {
+        return true;
+      }
+
+      if (choices.length === 1) {
+        await fillCredentialsFor163Mail(login163Fields, choices[0]);
+        return true;
+      }
+
+      const dropdownAnchorField = login163Fields.usernameField ?? login163Fields.passwordProxyField ?? login163Fields.passwordField;
+      if (!dropdownAnchorField) {
+        return false;
+      }
+
+      showAccountDropdown(dropdownAnchorField, choices, false, async (choice) => {
+        await fillCredentialsFor163Mail(login163Fields, choice);
+      });
+      return true;
+    }
+
     /**
      * 获取当前页面所有可见的用户名候选框（仅在无密码框时使用）。
      * 只匹配有明确登录语义的输入框，不匹配通用 text 输入框。
@@ -513,7 +673,12 @@ export default defineContentScript({
       });
     }
 
-    function showAccountDropdown(anchorField: HTMLInputElement, choices: AccountChoice[], isTwoStep: boolean = false): void {
+    function showAccountDropdown(
+      anchorField: HTMLInputElement,
+      choices: AccountChoice[],
+      isTwoStep: boolean = false,
+      onChoose?: (choice: AccountChoice) => Promise<void>,
+    ): void {
       closeAccountDropdown();
 
       const host = document.createElement("div");
@@ -593,6 +758,10 @@ export default defineContentScript({
 
         item.addEventListener("click", async () => {
           closeAccountDropdown();
+          if (onChoose) {
+            await onChoose(choice);
+            return;
+          }
           await fillCredentials(anchorField, choice, isTwoStep);
         });
 
@@ -644,6 +813,10 @@ export default defineContentScript({
             const chosen = choices[selectedIndex];
             if (chosen) {
               closeAccountDropdown();
+              if (onChoose) {
+                void onChoose(chosen);
+                break;
+              }
               void fillCredentials(anchorField, chosen, isTwoStep);
             }
             break;
@@ -668,6 +841,13 @@ export default defineContentScript({
      * 处理快捷键触发的账号填充。
      */
     async function handleFillFromShortcut(): Promise<void> {
+      if (is163AutofillContext(window.location.href)) {
+        const handled = await tryFill163MailFromShortcut();
+        if (handled) {
+          return;
+        }
+      }
+
       let anchorField: HTMLInputElement | null = null;
       let isTwoStep = false;
 

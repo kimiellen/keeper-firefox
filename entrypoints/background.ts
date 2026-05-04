@@ -1,5 +1,6 @@
 import { keeperClient } from '../api/client';
 import type { Bookmark, BookmarkCreate } from '../api/types';
+import { getAutofillMatchingHostnamesForUrls } from '../utils/autofillHeuristics';
 
 interface MatchingBookmark {
   bookmarkId: string;
@@ -100,15 +101,49 @@ function getHostname(url: string): string {
  * 判断书签是否与页面 URL 的主机名匹配。
  */
 function isBookmarkMatchingHostname(bookmark: Bookmark, pageUrl: string): boolean {
-  const pageHostname = getHostname(pageUrl);
+  const pageHostnames = new Set(getAutofillMatchingHostnamesForUrls([pageUrl]));
+  if (pageHostnames.size === 0) {
+    return false;
+  }
 
   return bookmark.urls.some((urlItem) => {
     try {
-      return getHostname(urlItem.url) === pageHostname;
+      return pageHostnames.has(getHostname(urlItem.url));
     } catch {
       return false;
     }
   });
+}
+
+function collectMatchingPageUrls(payloadUrl?: string, senderTabUrl?: string): string[] {
+  const urls: string[] = [];
+
+  if (payloadUrl) {
+    urls.push(payloadUrl);
+  }
+
+  if (senderTabUrl && senderTabUrl !== payloadUrl) {
+    urls.push(senderTabUrl);
+  }
+
+  return urls;
+}
+
+async function fetchAllBookmarks(): Promise<Bookmark[]> {
+  const limit = 5000;
+  let offset = 0;
+  const bookmarks: Bookmark[] = [];
+
+  while (true) {
+    const page = await keeperClient.getBookmarks({ limit, offset });
+    bookmarks.push(...page.data);
+
+    if (page.data.length < limit || bookmarks.length >= page.total) {
+      return bookmarks;
+    }
+
+    offset += limit;
+  }
 }
 
 /**
@@ -162,18 +197,24 @@ async function handleGetMatchingBookmarks(
   }
 
   try {
-    const pageUrl = sender?.tab?.url ?? payload.url;
-    console.log('[Keeper:bg] handleGetMatchingBookmarks called for URL:', pageUrl);
-    const bookmarksResult = await keeperClient.getBookmarks({ limit: 100 });
-    console.log('[Keeper:bg] got bookmarks:', bookmarksResult.data.length);
-    const matched = bookmarksResult.data.filter((bookmark) =>
-      isBookmarkMatchingHostname(bookmark, pageUrl),
+    const pageUrls = collectMatchingPageUrls(payload.url, sender?.tab?.url);
+    const pageHostnames = new Set(getAutofillMatchingHostnamesForUrls(pageUrls));
+    const bookmarks = await fetchAllBookmarks();
+    const matched = bookmarks.filter((bookmark) =>
+      Array.from(pageHostnames).length > 0
+        ? bookmark.urls.some((urlItem) => {
+            try {
+              return pageHostnames.has(getHostname(urlItem.url));
+            } catch {
+              return false;
+            }
+          })
+        : pageUrls.some((pageUrl) => isBookmarkMatchingHostname(bookmark, pageUrl)),
     );
-    console.log('[Keeper:bg] matched bookmarks:', matched.length);
 
     // 不返回密码（密码是加密格式），只返回账号标识
     // 密码在使用时通过 GET_DECRYPTED_PASSWORD 按需解密
-    const bookmarks: MatchingBookmark[] = matched.map((bookmark) => ({
+    const matchingBookmarks: MatchingBookmark[] = matched.map((bookmark) => ({
       bookmarkId: bookmark.id,
       name: bookmark.name,
       accounts: bookmark.accounts.map((account) => ({
@@ -183,7 +224,7 @@ async function handleGetMatchingBookmarks(
       })),
     }));
 
-    return { bookmarks };
+    return { bookmarks: matchingBookmarks };
   } catch (error) {
     console.error('[Keeper:bg] handleGetMatchingBookmarks error:', error);
     return { error: getErrorMessage(error) };
@@ -240,8 +281,8 @@ async function handleSaveCredentials(
   try {
     const pageHostname = getHostname(payload.url);
 
-    const bookmarksResult = await keeperClient.getBookmarks({ limit: 100 });
-    const existingBookmark = bookmarksResult.data.find((bookmark) =>
+    const bookmarks = await fetchAllBookmarks();
+    const existingBookmark = bookmarks.find((bookmark) =>
       isBookmarkMatchingHostname(bookmark, payload.url),
     );
 
