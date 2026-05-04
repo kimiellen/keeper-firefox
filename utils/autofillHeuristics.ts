@@ -2,6 +2,17 @@ export function is163LoginHost(hostname: string): boolean {
   return hostname === 'mail.163.com' || hostname === 'email.163.com';
 }
 
+function getNvidiaHostnames(url: URL): string[] {
+  const hostname = url.hostname.toLowerCase();
+  const pathname = url.pathname.toLowerCase();
+
+  if (hostname === 'login-pipl.nvgs.nvidia.cn' && pathname === '/v1/login/identifier') {
+    return ['login-pipl.nvgs.nvidia.cn', 'www.nvidia.cn'];
+  }
+
+  return [];
+}
+
 function getQqMailHostnames(url: URL): string[] {
   const hostname = url.hostname.toLowerCase();
 
@@ -57,6 +68,11 @@ export function getAutofillMatchingHostnames(url: string): string[] {
     const qqMailHostnames = getQqMailHostnames(parsed);
     if (qqMailHostnames.length > 0) {
       return qqMailHostnames;
+    }
+
+    const nvidiaHostnames = getNvidiaHostnames(parsed);
+    if (nvidiaHostnames.length > 0) {
+      return nvidiaHostnames;
     }
 
     if (hostname === 'dl.reg.163.com') {

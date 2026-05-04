@@ -99,6 +99,32 @@ function runTests(): void {
     qqMergedHostnames.includes('mail.qq.com') && qqMergedHostnames.includes('wx.mail.qq.com'),
     'merges QQ Mail top-level and ptlogin iframe URLs into the same bookmark-matching hostname set',
   );
+  const nvidiaLoginHostnames = getAutofillMatchingHostnames(
+    'https://login-pipl.nvgs.nvidia.cn/v1/login/identifier?preferred_nvidia=true',
+  );
+  assert(
+    nvidiaLoginHostnames.includes('www.nvidia.cn'),
+    'maps NVIDIA login host to www.nvidia.cn for bookmark matching',
+  );
+  assert(
+    nvidiaLoginHostnames.includes('login-pipl.nvgs.nvidia.cn'),
+    'keeps NVIDIA login host as a direct candidate hostname',
+  );
+  const nvidiaNonLoginHostnames = getAutofillMatchingHostnames(
+    'https://login-pipl.nvgs.nvidia.cn/v1/account/settings',
+  );
+  assert(
+    nvidiaNonLoginHostnames.length === 1 && nvidiaNonLoginHostnames[0] === 'login-pipl.nvgs.nvidia.cn',
+    'does not map unrelated NVIDIA login host paths to www.nvidia.cn',
+  );
+  const nvidiaMergedHostnames = getAutofillMatchingHostnamesForUrls([
+    'about:blank',
+    'https://login-pipl.nvgs.nvidia.cn/v1/login/identifier?preferred_nvidia=true',
+  ]);
+  assert(
+    nvidiaMergedHostnames.includes('www.nvidia.cn') && nvidiaMergedHostnames.includes('login-pipl.nvgs.nvidia.cn'),
+    'merges NVIDIA login page URLs into business and login hostnames for bookmark matching',
+  );
 
   assert(
     get163CredentialFieldRole({
